@@ -3,6 +3,7 @@ import type { PendingEmail } from "../pending-emails.js";
 import type { ToolRunContext } from "../plugins.js";
 import {
   appendPinguSignature,
+  gmailBodyText,
   gmailPlugin,
   PINGU_EMAIL_SIGNATURE,
   type GmailPort,
@@ -12,6 +13,9 @@ import {
 function fakePort(state: { raws: string[]; sent: string[] }): GmailPort {
   return {
     async searchMessages() { return []; },
+    async readMessage(messageId) {
+      return { id: messageId, from: "Sender <sender@example.com>", subject: "Project update", body: "Complete message body." };
+    },
     async createDraft(raw) {
       state.raws.push(raw);
       return `draft-${state.raws.length}`;
@@ -45,6 +49,31 @@ const draftArgs = {
 };
 
 describe("gmailPlugin", () => {
+  it("reads the complete message selected from search results", async () => {
+    const plugin = gmailPlugin(fakePort({ raws: [], sent: [] }), fakeStore());
+
+    const result = await plugin.run("read_gmail_message", JSON.stringify({ message_id: "message-1" }), chatContext());
+
+    expect(JSON.parse(result.output).message).toMatchObject({
+      id: "message-1",
+      subject: "Project update",
+      body: "Complete message body.",
+    });
+  });
+
+  it("extracts full plain text from nested MIME parts and falls back to HTML", () => {
+    const encoded = (value: string) => Buffer.from(value, "utf8").toString("base64url");
+    expect(gmailBodyText({
+      mimeType: "multipart/alternative",
+      parts: [
+        { mimeType: "text/plain", body: { data: encoded("First line.\nSecond line.") } },
+        { mimeType: "text/html", body: { data: encoded("<p>Ignored HTML.</p>") } },
+      ],
+    })).toBe("First line.\nSecond line.");
+    expect(gmailBodyText({ mimeType: "text/html", body: { data: encoded("<p>Hello &amp; welcome.</p><p>Next line.</p>") } }))
+      .toBe("Hello & welcome.\nNext line.");
+  });
+
   it("creates a draft, stores it pending, and reports draftCreated to the loop", async () => {
     const state = { raws: [], sent: [] };
     const store = fakeStore();
@@ -145,6 +174,6 @@ describe("gmailPlugin", () => {
   it("declares sending and drafting as side effecting, searching and reviewing as read-only", () => {
     const plugin = gmailPlugin(fakePort({ raws: [], sent: [] }), fakeStore());
     expect(plugin.sideEffectingTools).toEqual(["create_gmail_draft", "send_gmail_draft"]);
-    expect(plugin.privateTools).toEqual(["search_gmail", "create_gmail_draft", "send_gmail_draft", "review_gmail_draft"]);
+    expect(plugin.privateTools).toEqual(["search_gmail", "read_gmail_message", "create_gmail_draft", "send_gmail_draft", "review_gmail_draft"]);
   });
 });

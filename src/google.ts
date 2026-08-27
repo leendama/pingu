@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { google } from "googleapis";
 import type { CalendarPort } from "./capabilities/calendar.js";
-import type { GmailPort } from "./capabilities/gmail.js";
+import { gmailBodyText, type GmailPort } from "./capabilities/gmail.js";
 import type { JsonObject } from "./tools.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 import { googleCredentialsPath, googleTokenPath } from "./private-paths.js";
@@ -102,6 +102,24 @@ export function googleGmailPort(credentials?: RuntimeSettings["google"]): GmailP
         );
         return { id, ...headers, snippet: response.data.snippet };
       }));
+    },
+    async readMessage(messageId) {
+      const { gmail } = await googleClient(credentials);
+      const response = await gmail.users.messages.get({ userId: "me", id: messageId, format: "full" });
+      const headers = Object.fromEntries(
+        (response.data.payload?.headers ?? []).map((header) => [header.name?.toLowerCase(), header.value]),
+      );
+      return {
+        id: response.data.id,
+        threadId: response.data.threadId,
+        from: headers.from,
+        to: headers.to,
+        cc: headers.cc,
+        subject: headers.subject,
+        date: headers.date,
+        snippet: response.data.snippet,
+        body: gmailBodyText(response.data.payload),
+      };
     },
     async createDraft(raw) {
       const { gmail } = await googleClient(credentials);

@@ -7,6 +7,7 @@ import type { GmailPort } from "./gmail.js";
 function fakeGmail(): GmailPort {
   return {
     searchMessages: vi.fn(async () => [{ id: "old-message", from: "Sender <sender@example.com>" }]),
+    readMessage: vi.fn(async (id) => ({ id, body: "Complete message body." })),
     createDraft: vi.fn(async () => "draft"),
     sendDraft: vi.fn(async () => ({})),
   };

@@ -5,6 +5,8 @@ import { capabilityPlugin, cleanHeader, numberValue, stringArray, stringValue, t
 export interface GmailPort {
   /** Search messages and return sender/subject/date/snippet summaries, already resolved. */
   searchMessages(query: string | undefined, maxResults: number): Promise<GmailMessageSummary[]>;
+  /** Read one complete message, including its decoded text body. */
+  readMessage(messageId: string): Promise<GmailMessage>;
   /** Create a draft from a base64url RFC 2822 message and return its draft ID. */
   createDraft(raw: string): Promise<string>;
   sendDraft(draftId: string): Promise<{ messageId?: string | null; threadId?: string | null }>;
@@ -19,6 +21,19 @@ export interface GmailMessageSummary {
   snippet?: string | null;
 }
 
+export interface GmailMessage extends GmailMessageSummary {
+  threadId?: string | null;
+  cc?: string | null;
+  body: string;
+}
+
+export interface GmailMessagePart {
+  mimeType?: string | null;
+  filename?: string | null;
+  body?: { data?: string | null; attachmentId?: string | null } | null;
+  parts?: GmailMessagePart[] | null;
+}
+
 export interface PendingEmailStore {
   set(email: PendingEmail): Promise<void>;
   get(spaceId: string): Promise<PendingEmail | undefined>;
@@ -28,6 +43,42 @@ export interface PendingEmailStore {
 export const PINGU_EMAIL_SIGNATURE = "this email was composed by [Pingu](https://github.com/leendama/pingu), noot noot";
 const PINGU_URL = "https://github.com/leendama/pingu";
 const EMAIL_BOUNDARY = "pingu_signature_boundary";
+
+function decodeHtmlEntities(value: string): string {
+  const named: Record<string, string> = { amp: "&", apos: "'", gt: ">", lt: "<", nbsp: " ", quot: '"' };
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
+    const codePoint = entity.startsWith("#x")
+      ? Number.parseInt(entity.slice(2), 16)
+      : entity.startsWith("#") ? Number.parseInt(entity.slice(1), 10) : undefined;
+    if (codePoint !== undefined) return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : match;
+    return named[entity.toLowerCase()] ?? match;
+  });
+}
+
+function htmlToText(html: string): string {
+  return decodeHtmlEntities(html
+    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(?:div|p|li|tr|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, ""))
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function gmailBodyText(payload?: GmailMessagePart | null): string {
+  const plain: string[] = [];
+  const html: string[] = [];
+  function visit(part?: GmailMessagePart | null): void {
+    if (!part) return;
+    for (const child of part.parts ?? []) visit(child);
+    if (!part.body?.data || part.body.attachmentId || part.filename) return;
+    const decoded = Buffer.from(part.body.data, "base64url").toString("utf8");
+    if (part.mimeType === "text/plain") plain.push(decoded);
+    if (part.mimeType === "text/html") html.push(decoded);
+  }
+  visit(payload);
+  return (plain.length ? plain.join("\n") : htmlToText(html.join("\n"))).trim();
+}
 
 export function appendPinguSignature(body: string): string {
   const cleanBody = body.trimEnd();
@@ -87,7 +138,12 @@ export function buildRawEmail(args: JsonObject): string {
 
 export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): PinguPlugin {
   return capabilityPlugin(
-    { id: "gmail", name: "Gmail", description: "Search, draft, review, and confirmation-gated sending." },
+    {
+      id: "gmail",
+      name: "Gmail",
+      description: "Search, read, draft, review, and confirmation-gated sending.",
+      instructions: ["Gmail search returns summaries. Call read_gmail_message with a result ID whenever the user asks to read, summarize, quote, or reply based on the full email."],
+    },
     [
       {
         schema: {
@@ -112,6 +168,28 @@ export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): 
             Math.min(Math.max(numberValue(args.max_results, 5), 1), 10),
           );
           return { output: JSON.stringify({ messages }) };
+        },
+      },
+      {
+        schema: {
+          type: "function",
+          name: "read_gmail_message",
+          description: "Read one complete Gmail message by ID, including its full decoded text body. Use an ID returned by search_gmail.",
+          strict: true,
+          parameters: {
+            type: "object",
+            properties: {
+              message_id: { type: "string", description: "Gmail message ID returned by search_gmail." },
+            },
+            required: ["message_id"],
+            additionalProperties: false,
+          },
+        },
+        sideEffecting: false,
+        run: async (args) => {
+          const messageId = stringValue(args.message_id);
+          if (!messageId) throw new Error("A Gmail message ID is required.");
+          return { output: JSON.stringify({ message: await port.readMessage(messageId) }) };
         },
       },
       {

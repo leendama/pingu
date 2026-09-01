@@ -1,6 +1,6 @@
 import type { Tool } from "openai/resources/responses/responses";
 import { describe, expect, it } from "vitest";
-import { PluginRegistry, type AssistantPlugin, type ToolRunContext } from "./plugins.js";
+import { PluginRegistry, resetAttemptOutputs, type AssistantPlugin, type ToolRunContext } from "./plugins.js";
 
 const schema: Tool = {
   type: "function",
@@ -24,5 +24,14 @@ describe("PluginRegistry", () => {
     const direct = context(false);
     expect(await registry.run("example", "{}", direct)).toEqual({ handled: true, output: "ok" });
     expect(direct.sideEffectAttempted).toBe(true);
+  });
+
+  it("clears per-attempt delivery outputs before a replay", () => {
+    const attempt = context(false);
+    attempt.richResponseSent = true;
+    attempt.draftForReview = "draft-1";
+    resetAttemptOutputs(attempt);
+    expect(attempt.richResponseSent).toBe(false);
+    expect(attempt.draftForReview).toBeUndefined();
   });
 });

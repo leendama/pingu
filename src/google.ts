@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { google } from "googleapis";
 import type { CalendarPort } from "./capabilities/calendar.js";
-import { gmailBodyText, type GmailPort } from "./capabilities/gmail.js";
+import { boundedGmailBody, type GmailPort } from "./capabilities/gmail.js";
 import type { JsonObject } from "./tools.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 import { googleCredentialsPath, googleTokenPath } from "./private-paths.js";
@@ -135,7 +135,7 @@ export function googleGmailPort(credentials?: RuntimeSettings["google"]): GmailP
         subject: headers.subject,
         date: headers.date,
         snippet: response.data.snippet,
-        body: gmailBodyText(response.data.payload),
+        ...boundedGmailBody(response.data.payload),
       };
     },
     async createDraft(raw) {

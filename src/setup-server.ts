@@ -2,6 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import express from "express";
 import helmet from "helmet";
 import { ZodError } from "zod";
+import type { StartOutcome } from "./agent-starter.js";
 import { loadConfig, publicUrl, saveConfig, type AssistantConfig } from "./config.js";
 import { googleOAuthClient, googleScopes } from "./google.js";
 
@@ -53,7 +54,7 @@ function setup(config?: AssistantConfig, message = ""): string {
   ${config && !config.google.refreshToken ? `<a class="button" href="/auth/google">Connect Google</a>` : ""}${config?.google.refreshToken ? "<p class=\"status\">Google is connected. Pingu is ready.</p>" : ""}`);
 }
 
-export function createSetupServer(onReady: (config: AssistantConfig) => boolean) {
+export function createSetupServer(onReady: (config: AssistantConfig) => StartOutcome) {
   const app = express();
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(express.urlencoded({ extended: false, limit: "32kb" }));
@@ -89,12 +90,14 @@ export function createSetupServer(onReady: (config: AssistantConfig) => boolean)
         granolaApiKey: body.granolaApiKey || existing?.granolaApiKey || undefined,
         google: { clientId: body.googleClientId, clientSecret: body.googleClientSecret || existing?.google.clientSecret, refreshToken: body.googleClientId === existing?.google.clientId ? existing?.google.refreshToken : undefined },
       });
-      const started = config.google.refreshToken ? onReady(config) : false;
-      const message = !config.google.refreshToken
+      const outcome = config.google.refreshToken ? onReady(config) : undefined;
+      const message = !outcome
         ? "Saved. Connect Google to finish."
-        : started
+        : outcome.started
           ? "Saved and running."
-          : "Saved. Restart the app to apply these settings.";
+          : outcome.reason === "invalid-settings"
+            ? `Saved, but the assistant could not start: ${outcome.message}`
+            : "Saved. Restart the app to apply these settings.";
       response.send(setup(config, message));
     } catch (error) {
       const message = error instanceof ZodError ? error.issues.map((issue) => issue.message).join(" ") : error instanceof Error ? error.message : "Setup failed.";
@@ -122,8 +125,8 @@ export function createSetupServer(onReady: (config: AssistantConfig) => boolean)
       const refreshToken = tokens.refresh_token || config.google.refreshToken;
       if (!refreshToken) throw new Error("Google did not return a refresh token. Remove the app from Google account access and try again.");
       const updated = await saveConfig({ ...config, google: { ...config.google, refreshToken } });
-      const started = onReady(updated);
-      response.redirect(started ? "/setup" : "/setup?restart=1");
+      const outcome = onReady(updated);
+      response.redirect(outcome.started ? "/setup" : "/setup?restart=1");
     } catch (error) {
       response.status(400).send(page(`<h1>Google connection failed</h1><p class="status warn">${escapeHtml(error instanceof Error ? error.message : "Unknown error")}</p><a class="button" href="/setup">Back</a>`));
     }

@@ -25,6 +25,8 @@ export interface GmailMessage extends GmailMessageSummary {
   threadId?: string | null;
   cc?: string | null;
   body: string;
+  /** True when the body was cut at GMAIL_BODY_CHAR_LIMIT. */
+  truncated?: boolean;
 }
 
 export interface GmailMessagePart {
@@ -68,9 +70,9 @@ function htmlToText(html: string): string {
 export function gmailBodyText(payload?: GmailMessagePart | null): string {
   const plain: string[] = [];
   const html: string[] = [];
-  function visit(part?: GmailMessagePart | null): void {
-    if (!part) return;
-    for (const child of part.parts ?? []) visit(child);
+  function visit(part?: GmailMessagePart | null, depth = 0): void {
+    if (!part || depth > 10) return;
+    for (const child of part.parts ?? []) visit(child, depth + 1);
     if (!part.body?.data || part.body.attachmentId || part.filename) return;
     const decoded = Buffer.from(part.body.data, "base64url").toString("utf8");
     if (part.mimeType === "text/plain") plain.push(decoded);
@@ -78,6 +80,18 @@ export function gmailBodyText(payload?: GmailMessagePart | null): string {
   }
   visit(payload);
   return (plain.length ? plain.join("\n") : htmlToText(html.join("\n"))).trim();
+}
+
+/** Bounds what one email can push into the model's context window. */
+export const GMAIL_BODY_CHAR_LIMIT = 20_000;
+
+export function boundedGmailBody(payload?: GmailMessagePart | null): { body: string; truncated: boolean } {
+  const full = gmailBodyText(payload);
+  if (full.length <= GMAIL_BODY_CHAR_LIMIT) return { body: full, truncated: false };
+  return {
+    body: `${full.slice(0, GMAIL_BODY_CHAR_LIMIT)}\n\n[Truncated: the full message is ${full.length} characters. Tell the user the rest was cut off.]`,
+    truncated: true,
+  };
 }
 
 export function appendPinguSignature(body: string): string {

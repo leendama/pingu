@@ -21,7 +21,7 @@ describe("setup recovery", () => {
     process.env.PHOTON_SETUP_TOKEN = "server-test-setup-token-long-enough";
     process.env.PHOTON_PUBLIC_URL = "http://localhost";
     await writeFile(join(directory, "config.enc.json"), "{invalid", "utf8");
-    const server = createSetupServer(() => true).listen(0, "127.0.0.1");
+    const server = createSetupServer(() => ({ started: true })).listen(0, "127.0.0.1");
     await new Promise<void>((resolve) => server.once("listening", resolve));
     const port = (server.address() as AddressInfo).port;
     try {

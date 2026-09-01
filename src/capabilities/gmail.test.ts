@@ -3,9 +3,12 @@ import type { PendingEmail } from "../pending-emails.js";
 import type { ToolRunContext } from "../plugins.js";
 import {
   appendPinguSignature,
+  boundedGmailBody,
+  GMAIL_BODY_CHAR_LIMIT,
   gmailBodyText,
   gmailPlugin,
   PINGU_EMAIL_SIGNATURE,
+  type GmailMessagePart,
   type GmailPort,
   type PendingEmailStore,
 } from "./gmail.js";
@@ -72,6 +75,25 @@ describe("gmailPlugin", () => {
     })).toBe("First line.\nSecond line.");
     expect(gmailBodyText({ mimeType: "text/html", body: { data: encoded("<p>Hello &amp; welcome.</p><p>Next line.</p>") } }))
       .toBe("Hello & welcome.\nNext line.");
+  });
+
+  it("caps an oversized body and marks it truncated", () => {
+    const encoded = (value: string) => Buffer.from(value, "utf8").toString("base64url");
+    const huge = "x".repeat(GMAIL_BODY_CHAR_LIMIT + 5_000);
+    const bounded = boundedGmailBody({ mimeType: "text/plain", body: { data: encoded(huge) } });
+    expect(bounded.truncated).toBe(true);
+    expect(bounded.body).toContain("[Truncated: the full message is");
+    expect(bounded.body.length).toBeLessThan(GMAIL_BODY_CHAR_LIMIT + 200);
+
+    const small = boundedGmailBody({ mimeType: "text/plain", body: { data: encoded("short") } });
+    expect(small).toEqual({ body: "short", truncated: false });
+  });
+
+  it("stops descending into MIME parts past the depth limit", () => {
+    const encoded = (value: string) => Buffer.from(value, "utf8").toString("base64url");
+    let payload: GmailMessagePart = { mimeType: "text/plain", body: { data: encoded("too deep") } };
+    for (let level = 0; level < 15; level += 1) payload = { mimeType: "multipart/mixed", parts: [payload] };
+    expect(gmailBodyText(payload)).toBe("");
   });
 
   it("creates a draft, stores it pending, and reports draftCreated to the loop", async () => {

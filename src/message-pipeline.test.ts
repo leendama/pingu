@@ -112,8 +112,29 @@ describe("message pipeline", () => {
     expect(await sentContentText(send, 0)).toContain("couldn't read that message");
   });
 
-  it("fails closed for an unknown conversation type", () => {
-    expect(() => spaceKind({ type: "mystery" } as unknown as Space)).toThrow(/Private tools remain disabled/);
+  it("classifies an unknown conversation type instead of throwing", () => {
+    expect(spaceKind({ type: "mystery" } as unknown as Space)).toBe("unknown");
+  });
+
+  it("treats an unknown conversation type as a group and tells the user", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "Done");
+    const send = vi.fn(async (_content: unknown) => undefined);
+    const message = inboundMessage("what's on my calendar?");
+    const space = {
+      id: "chat",
+      type: "mystery",
+      read: vi.fn(async () => undefined),
+      responding: async (operation: () => Promise<string>) => operation(),
+      send,
+    } as unknown as Space;
+
+    await createMessageProcessor(deps)(space, message);
+
+    expect(await sentContentText(send, 0)).toContain("private tools are disabled");
+    const context = deps.generateReply.mock.calls[0]?.[2] as { isGroup: boolean };
+    expect(context.isGroup).toBe(true);
+    expect((message as unknown as { reply: ReturnType<typeof vi.fn> }).reply).toHaveBeenCalledOnce();
   });
 
   it("keeps every rapid message in one ordered model request", async () => {

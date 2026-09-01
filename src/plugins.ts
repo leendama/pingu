@@ -20,6 +20,12 @@ export interface PluginRunResult {
   draftCreated?: string;
 }
 
+/** Clear per-attempt delivery outputs before a replay, so a stale draft or rich response cannot leak into the retry. */
+export function resetAttemptOutputs(context: Pick<ToolRunContext, "richResponseSent" | "draftForReview">): void {
+  context.richResponseSent = false;
+  context.draftForReview = undefined;
+}
+
 export interface AssistantPlugin {
   id: string;
   name: string;

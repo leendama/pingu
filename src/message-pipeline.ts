@@ -33,12 +33,9 @@ export function formatEmailDraft(email: PendingEmail): string {
   ].join("\n");
 }
 
-export function spaceKind(space: Space): "dm" | "group" {
+export function spaceKind(space: Space): "dm" | "group" | "unknown" {
   const kind = (space as unknown as { type?: unknown }).type;
-  if (kind !== "dm" && kind !== "group") {
-    throw new Error("Spectrum returned an unknown conversation type. Private tools remain disabled for this message.");
-  }
-  return kind;
+  return kind === "dm" || kind === "group" ? kind : "unknown";
 }
 
 function describeContent(content: Content, depth = 0): string | undefined {
@@ -101,7 +98,20 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
     }
 
     const inboundText = combineInboundMessages(messages);
-    const isGroup = spaceKind(space) === "group";
+    const kind = spaceKind(space);
+    // Unknown conversation types fail closed (group-level privacy) — and visibly, not silently.
+    const isGroup = kind !== "dm";
+    if (kind === "unknown") {
+      console.warn("Spectrum returned an unknown conversation type. Treating it as a group chat for this message.", { spaceId: space.id });
+      try {
+        await space.send(markdown("I can't tell whether this is a group chat, so private tools are disabled for this message."));
+      } catch (error) {
+        console.error("Unable to deliver the unknown-conversation notice:", {
+          name: error instanceof Error ? error.name : "UnknownError",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const confirmationText = messages.length === 1 ? directInboundText(message)! : inboundText;
     const confirmation = await dependencies.consumeEmailConfirmation(space.id, confirmationText);
     const context: ToolRunContext = {

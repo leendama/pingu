@@ -10,11 +10,10 @@ import { createMessageProcessor, inboundMessageText } from "./message-pipeline.j
 import { consumePendingEmailConfirmation, getPendingEmail, markPendingEmailReviewed } from "./pending-emails.js";
 import { emailAlertStore, startEmailAlertScheduler } from "./email-alerts.js";
 import { googleGmailPort } from "./google.js";
-import { PluginRegistry, type ToolRunContext } from "./plugins.js";
+import { PluginRegistry, resetAttemptOutputs, type ToolRunContext } from "./plugins.js";
 import { startReminderScheduler } from "./reminders.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 import { KeyedBatchQueue } from "./task-queue.js";
-import { resetAttemptOutputs } from "./turn-state.js";
 
 class IncompleteResponseError extends Error {
   constructor(readonly reason: string | undefined) {

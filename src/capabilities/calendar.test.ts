@@ -1,19 +1,24 @@
 import { describe, expect, it } from "vitest";
 import type { ToolRunContext } from "../plugins.js";
-import { calendarPlugin, type CalendarPort } from "./calendar.js";
+import { calendarPlugin, type CalendarEventData, type CalendarPort } from "./calendar.js";
 
 interface RecordedCall {
-  method: "list" | "insert" | "patch" | "delete";
+  method: "list" | "get" | "insert" | "patch" | "delete";
   eventId?: string;
   requestBody?: Record<string, unknown>;
   sendUpdates?: "all" | "none";
 }
 
-function fakePort(calls: RecordedCall[]): CalendarPort {
+function fakePort(calls: RecordedCall[], initial: CalendarEventData[] = []): CalendarPort {
+  const events = new Map(initial.map((event) => [event.id!, structuredClone(event)]));
   return {
     async listEvents() {
       calls.push({ method: "list" });
-      return [{ id: "evt-1" }];
+      return [...events.values()];
+    },
+    async getEvent(eventId) {
+      calls.push({ method: "get", eventId });
+      return events.get(eventId);
     },
     async insertEvent(requestBody, sendUpdates) {
       calls.push({ method: "insert", requestBody, sendUpdates });
@@ -21,10 +26,13 @@ function fakePort(calls: RecordedCall[]): CalendarPort {
     },
     async patchEvent(eventId, requestBody, sendUpdates) {
       calls.push({ method: "patch", eventId, requestBody, sendUpdates });
-      return { id: eventId };
+      const event = { ...(events.get(eventId) ?? { id: eventId }), ...requestBody };
+      events.set(eventId, event);
+      return event;
     },
     async deleteEvent(eventId, sendUpdates) {
       calls.push({ method: "delete", eventId, sendUpdates });
+      events.delete(eventId);
     },
   };
 }
@@ -119,9 +127,78 @@ describe("calendarPlugin", () => {
     expect(calls).toEqual([{ method: "delete", eventId: "evt-9", sendUpdates: "all" }]);
   });
 
+  it("rejects a single move that overlaps an existing event", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [
+      { id: "move", summary: "Focus", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T10:00:00Z" } },
+      { id: "busy", summary: "Meeting", start: { dateTime: "2026-09-01T18:30:00Z" }, end: { dateTime: "2026-09-01T19:30:00Z" } },
+    ]));
+    const result = await plugin.run("reschedule_calendar_event", JSON.stringify({
+      event_id: "move", new_start: "2026-09-01T18:00:00Z", new_end: "2026-09-01T19:00:00Z", timezone: "UTC",
+    }), context);
+    expect(JSON.parse(result.output).error).toMatch(/conflicts with existing event busy/);
+    expect(calls.some((call) => call.method === "patch")).toBe(false);
+  });
+
+  it("moves a complete ordered sequence and deletes a duplicate after verification", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [
+      { id: "a", summary: "Course lessons 1-2", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T10:00:00Z" } },
+      { id: "b", summary: "Course lessons 3-4", start: { dateTime: "2026-09-02T09:00:00Z" }, end: { dateTime: "2026-09-02T10:00:00Z" } },
+      { id: "copy", summary: "Course lessons 1-2", start: { dateTime: "2026-09-03T09:00:00Z" }, end: { dateTime: "2026-09-03T10:00:00Z" } },
+    ]));
+    const result = await plugin.run("bulk_reschedule_calendar_events", JSON.stringify({
+      moves: [
+        { event_id: "a", new_start: "2026-09-04T09:00:00Z", new_end: "2026-09-04T10:00:00Z", sequence_group: "Course lessons" },
+        { event_id: "b", new_start: "2026-09-05T09:00:00Z", new_end: "2026-09-05T10:00:00Z", sequence_group: "Course lessons" },
+      ],
+      duplicate_event_ids: ["copy"], timezone: "UTC",
+    }), context);
+    expect(JSON.parse(result.output)).toEqual({ completed: true, moved_count: 2, deleted_duplicate_count: 1 });
+    const deleteIndex = calls.findIndex((call) => call.method === "delete");
+    const lastMoveVerification = Math.max(...calls.map((call, index) => call.method === "get" && (call.eventId === "a" || call.eventId === "b") ? index : -1));
+    expect(deleteIndex).toBeGreaterThan(lastMoveVerification);
+  });
+
+  it("rejects a bulk move that puts a prerequisite after a later lesson", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [
+      { id: "first", summary: "Course lessons 1-2", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T10:00:00Z" } },
+      { id: "later", summary: "Course lessons 3-4", start: { dateTime: "2026-09-03T09:00:00Z" }, end: { dateTime: "2026-09-03T10:00:00Z" } },
+    ]));
+    const result = await plugin.run("bulk_reschedule_calendar_events", JSON.stringify({
+      moves: [{ event_id: "first", new_start: "2026-09-04T09:00:00Z", new_end: "2026-09-04T10:00:00Z", sequence_group: null }],
+      duplicate_event_ids: [], timezone: "UTC",
+    }), context);
+    expect(JSON.parse(result.output).error).toMatch(/breaks prerequisite order/);
+    expect(calls.some((call) => call.method === "patch")).toBe(false);
+  });
+
+  it("rolls back earlier moves when a later patch fails", async () => {
+    const calls: RecordedCall[] = [];
+    const base = fakePort(calls, [
+      { id: "one", summary: "Block one", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T10:00:00Z" } },
+      { id: "two", summary: "Block two", start: { dateTime: "2026-09-02T09:00:00Z" }, end: { dateTime: "2026-09-02T10:00:00Z" } },
+    ]);
+    const patch = base.patchEvent.bind(base);
+    let failed = false;
+    base.patchEvent = async (eventId, body, sendUpdates) => {
+      if (eventId === "two" && !failed) { failed = true; throw new Error("temporary failure"); }
+      return patch(eventId, body, sendUpdates);
+    };
+    const result = await calendarPlugin(base).run("bulk_reschedule_calendar_events", JSON.stringify({
+      moves: [
+        { event_id: "one", new_start: "2026-09-04T09:00:00Z", new_end: "2026-09-04T10:00:00Z", sequence_group: null },
+        { event_id: "two", new_start: "2026-09-05T09:00:00Z", new_end: "2026-09-05T10:00:00Z", sequence_group: null },
+      ], duplicate_event_ids: [], timezone: "UTC",
+    }), context);
+    expect(JSON.parse(result.output).error).toMatch(/All applied moves were rolled back/);
+    expect(calls.filter((call) => call.method === "patch" && call.eventId === "one")).toHaveLength(2);
+  });
+
   it("declares only search_calendar as read-only and every tool as private", () => {
     const plugin = calendarPlugin(fakePort([]));
-    expect(plugin.sideEffectingTools).toEqual(["delete_calendar_event", "reschedule_calendar_event", "create_calendar_event", "edit_calendar_event"]);
-    expect(plugin.privateTools).toEqual(["search_calendar", "delete_calendar_event", "reschedule_calendar_event", "create_calendar_event", "edit_calendar_event"]);
+    expect(plugin.sideEffectingTools).toEqual(["delete_calendar_event", "reschedule_calendar_event", "bulk_reschedule_calendar_events", "create_calendar_event", "edit_calendar_event"]);
+    expect(plugin.privateTools).toEqual(["search_calendar", "delete_calendar_event", "reschedule_calendar_event", "bulk_reschedule_calendar_events", "create_calendar_event", "edit_calendar_event"]);
   });
 });

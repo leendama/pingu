@@ -59,16 +59,33 @@ export function googleCalendarPort(credentials?: RuntimeSettings["google"]): Cal
   return {
     async listEvents(params) {
       const { calendar } = await googleClient(credentials);
-      const result = await calendar.events.list({
-        calendarId: "primary",
-        timeMin: params.timeMin,
-        timeMax: params.timeMax,
-        q: params.query,
-        singleEvents: true,
-        orderBy: "startTime",
-        maxResults: 25,
-      });
-      return result.data.items ?? [];
+      const events = [];
+      let pageToken: string | undefined;
+      do {
+        const result = await calendar.events.list({
+          calendarId: "primary",
+          timeMin: params.timeMin,
+          timeMax: params.timeMax,
+          q: params.query,
+          singleEvents: true,
+          orderBy: "startTime",
+          maxResults: 2500,
+          pageToken,
+        });
+        events.push(...(result.data.items ?? []));
+        pageToken = result.data.nextPageToken ?? undefined;
+      } while (pageToken);
+      return events;
+    },
+    async getEvent(eventId) {
+      const { calendar } = await googleClient(credentials);
+      try {
+        return (await calendar.events.get({ calendarId: "primary", eventId })).data;
+      } catch (error) {
+        const status = typeof error === "object" && error && "code" in error ? Number(error.code) : undefined;
+        if (status === 404 || status === 410) return undefined;
+        throw error;
+      }
     },
     async insertEvent(requestBody: JsonObject, sendUpdates) {
       const { calendar } = await googleClient(credentials);

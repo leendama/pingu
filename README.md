@@ -54,7 +54,7 @@ By default, the assistant uses `gpt-5.6-luna`. Voice notes use `gpt-4o-mini-tts`
 npm run connect:google
 ```
 
-Your Google token is saved under `PHOTON_DATA_DIR`, or in `data/google-token.json` when no external data directory is set. The assistant can read Calendar, create events, move events, edit events, search Gmail, read complete email bodies, and create drafts. It sends email after showing the full draft and receiving confirmation in your next message.
+Your Google token is saved under `PHOTON_DATA_DIR`, or in `data/google-token.json` when no external data directory is set. The assistant can read Calendar, create events, move one event or a whole sequence without calendar clashes, clean up duplicate events, edit events, search Gmail, read complete email bodies, and create drafts. It sends email after showing the full draft and receiving confirmation in your next message.
 
 ## Connect Granola
 

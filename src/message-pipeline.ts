@@ -13,7 +13,7 @@ export interface MessagePipelineDependencies {
   progressDelayMs?: number;
   generateReply: (spaceId: string, inboundText: string, context: ToolRunContext) => Promise<string>;
   synthesizeVoice: (text: string) => Promise<Buffer>;
-  consumeEmailConfirmation: (spaceId: string, text: string) => Promise<ConfirmationResult>;
+  consumeEmailConfirmation: (spaceId: string, texts: readonly string[]) => Promise<ConfirmationResult>;
   getPendingEmail: (spaceId: string) => Promise<PendingEmail | undefined>;
   markEmailReviewed: (spaceId: string, draftId: string) => Promise<void>;
 }
@@ -112,8 +112,10 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
         });
       }
     }
-    const confirmationText = messages.length === 1 ? directInboundText(message)! : inboundText;
-    const confirmation = await dependencies.consumeEmailConfirmation(space.id, confirmationText);
+    // Each message is matched individually — a burst combining "send it" with a
+    // follow-up must not hide the confirmation inside the combined prose.
+    const confirmationTexts = messages.map((item) => directInboundText(item)).filter((item): item is string => Boolean(item));
+    const confirmation = await dependencies.consumeEmailConfirmation(space.id, confirmationTexts);
     const context: ToolRunContext = {
       config: { timezone: dependencies.timezone },
       spaceId: space.id,

@@ -1,9 +1,13 @@
 import "./env.js";
-import { createAgentStarter } from "./agent-starter.js";
+import { createAgentStarter, type StartOutcome } from "./agent-starter.js";
 import { startAgent } from "./agent.js";
 import { loadConfig, publicUrl, type AssistantConfig } from "./config.js";
 import { settingsFromConfig, settingsFromEnvironment, type RuntimeSettings } from "./runtime-settings.js";
 import { createSetupServer } from "./setup-server.js";
+
+function failureMessage(outcome: StartOutcome & { started: false }): string {
+  return outcome.reason === "already-running" ? "the assistant is already running" : outcome.message;
+}
 
 const startConfiguredAgent = createAgentStarter<AssistantConfig, RuntimeSettings>({
   buildSettings: (config) => config
@@ -19,20 +23,21 @@ const startConfiguredAgent = createAgentStarter<AssistantConfig, RuntimeSettings
 
 const locallyConfigured = Boolean(process.env.PROJECT_ID && process.env.PROJECT_SECRET && process.env.OPENAI_API_KEY);
 if (locallyConfigured && !process.env.PHOTON_SETUP_TOKEN) {
-  const outcome = startConfiguredAgent();
-  if (!outcome.started) {
-    console.error("Assistant could not start:", outcome.reason === "invalid-settings" ? outcome.message : outcome.reason);
-    process.exit(1);
-  }
+  void startConfiguredAgent().then((outcome) => {
+    if (!outcome.started) {
+      console.error("Assistant could not start:", failureMessage(outcome));
+      process.exit(1);
+    }
+  });
 } else {
   const port = Number(process.env.PORT || 3000);
   createSetupServer(startConfiguredAgent).listen(port, "0.0.0.0", () => {
     console.log(`Setup wizard listening on port ${port}.`);
   });
-  void loadConfig().then((config) => {
+  void loadConfig().then(async (config) => {
     if (!config?.google.refreshToken) return;
-    const outcome = startConfiguredAgent(config);
-    if (!outcome.started && outcome.reason === "invalid-settings") {
+    const outcome = await startConfiguredAgent(config);
+    if (!outcome.started && outcome.reason !== "already-running") {
       console.error("Saved configuration could not start the assistant:", outcome.message);
     }
   }).catch((error) => {

@@ -49,7 +49,8 @@ describe("calendarPlugin", () => {
       timezone: "UTC", description: null, location: null, attendees: [],
     }), context);
     expect(JSON.parse(noAttendees.output).created).toBe(true);
-    expect(calls[0]).toMatchObject({
+    const inserts = () => calls.filter((call) => call.method === "insert");
+    expect(inserts()[0]).toMatchObject({
       method: "insert",
       sendUpdates: "none",
       requestBody: { start: { dateTime: "2026-09-01T09:00:00", timeZone: "UTC" } },
@@ -59,7 +60,7 @@ describe("calendarPlugin", () => {
       title: "Review", start: "2026-09-01T10:00:00", end: "2026-09-01T11:00:00",
       timezone: "UTC", description: null, location: null, attendees: ["a@example.com"],
     }), context);
-    expect(calls[1]).toMatchObject({ method: "insert", sendUpdates: "all" });
+    expect(inserts()[1]).toMatchObject({ method: "insert", sendUpdates: "all" });
   });
 
   it("creates an all-day event from bare dates", async () => {
@@ -202,11 +203,85 @@ describe("calendarPlugin", () => {
       { id: "later", summary: "Course lessons 3-4", start: { dateTime: "2026-09-03T09:00:00Z" }, end: { dateTime: "2026-09-03T10:00:00Z" } },
     ]));
     const result = await plugin.run("bulk_reschedule_calendar_events", JSON.stringify({
-      moves: [{ event_id: "first", new_start: "2026-09-04T09:00:00Z", new_end: "2026-09-04T10:00:00Z", sequence_group: null }],
+      moves: [{ event_id: "first", new_start: "2026-09-04T09:00:00Z", new_end: "2026-09-04T10:00:00Z", sequence_group: "Course lessons" }],
       duplicate_event_ids: [], timezone: "UTC",
     }), context);
     expect(JSON.parse(result.output).error).toMatch(/breaks prerequisite order/);
     expect(calls.some((call) => call.method === "patch")).toBe(false);
+  });
+
+  it("lets an explicit null sequence_group opt out of title-based sequence inference", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [
+      { id: "first", summary: "Course lessons 1-2", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T10:00:00Z" } },
+      { id: "later", summary: "Course lessons 3-4", start: { dateTime: "2026-09-03T09:00:00Z" }, end: { dateTime: "2026-09-03T10:00:00Z" } },
+    ]));
+    const result = await plugin.run("bulk_reschedule_calendar_events", JSON.stringify({
+      moves: [{ event_id: "first", new_start: "2026-09-04T09:00:00Z", new_end: "2026-09-04T10:00:00Z", sequence_group: null }],
+      duplicate_event_ids: [], timezone: "UTC",
+    }), context);
+    expect(JSON.parse(result.output)).toEqual({ completed: true, moved_count: 1, deleted_duplicate_count: 0 });
+  });
+
+  it("resolves all-day dates in the event's timezone when checking conflicts", async () => {
+    const allDay = { id: "allday", summary: "Conference", start: { date: "2026-09-01" }, end: { date: "2026-09-02" } };
+    const mover = { id: "move", summary: "Focus", start: { dateTime: "2026-09-05T09:00:00+10:00" }, end: { dateTime: "2026-09-05T10:00:00+10:00" } };
+
+    const inside = await calendarPlugin(fakePort([], [allDay, mover])).run("reschedule_calendar_event", JSON.stringify({
+      event_id: "move", new_start: "2026-09-01T09:00:00+10:00", new_end: "2026-09-01T10:00:00+10:00", timezone: "Australia/Sydney",
+    }), context);
+    expect(JSON.parse(inside.output).error).toMatch(/conflicts with existing event allday/);
+
+    const outside = await calendarPlugin(fakePort([], [structuredClone(allDay), structuredClone(mover)])).run("reschedule_calendar_event", JSON.stringify({
+      event_id: "move", new_start: "2026-09-02T09:00:00+10:00", new_end: "2026-09-02T10:00:00+10:00", timezone: "Australia/Sydney",
+    }), context);
+    expect(JSON.parse(outside.output).moved).toBe(true);
+  });
+
+  it("refuses to create a timed event over a busy time", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [
+      { id: "busy", summary: "Meeting", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T10:00:00Z" } },
+    ]));
+    const result = await plugin.run("create_calendar_event", JSON.stringify({
+      title: "Clash", start: "2026-09-01T09:30:00Z", end: "2026-09-01T10:30:00Z",
+      timezone: "UTC", description: null, location: null, attendees: [],
+    }), context);
+    expect(JSON.parse(result.output).error).toMatch(/conflicts with existing event busy \(Meeting\)/);
+    expect(calls.some((call) => call.method === "insert")).toBe(false);
+  });
+
+  it("creates an all-day event over a busy day without a conflict check", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [
+      { id: "busy", summary: "Meeting", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T10:00:00Z" } },
+    ]));
+    const result = await plugin.run("create_calendar_event", JSON.stringify({
+      title: "Conference", start: "2026-09-01", end: "2026-09-02",
+      timezone: "UTC", description: null, location: null, attendees: [],
+    }), context);
+    expect(JSON.parse(result.output).created).toBe(true);
+  });
+
+  it("refuses an edit that moves an event onto a busy time, but not onto itself", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [
+      { id: "self", summary: "Focus", start: { dateTime: "2026-09-01T13:00:00Z" }, end: { dateTime: "2026-09-01T14:00:00Z" } },
+      { id: "busy", summary: "Meeting", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T10:00:00Z" } },
+    ]));
+    const clash = await plugin.run("edit_calendar_event", JSON.stringify({
+      event_id: "self", title: null, new_start: "2026-09-01T09:30:00Z", new_end: "2026-09-01T10:30:00Z",
+      timezone: "UTC", description: null, clear_description: false,
+      location: null, clear_location: false, attendees: null,
+    }), context);
+    expect(JSON.parse(clash.output).error).toMatch(/conflicts with existing event busy/);
+
+    const shifted = await plugin.run("edit_calendar_event", JSON.stringify({
+      event_id: "self", title: null, new_start: "2026-09-01T13:30:00Z", new_end: "2026-09-01T14:30:00Z",
+      timezone: "UTC", description: null, clear_description: false,
+      location: null, clear_location: false, attendees: null,
+    }), context);
+    expect(JSON.parse(shifted.output).edited).toBe(true);
   });
 
   it("rolls back earlier moves when a later patch fails", async () => {

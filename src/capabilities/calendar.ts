@@ -33,7 +33,8 @@ interface RescheduleMove {
   eventId: string;
   newStart: string;
   newEnd: string;
-  sequenceGroup?: string;
+  /** Explicit group name, or null to opt out of title-based sequence inference. Undefined infers from the title. */
+  sequenceGroup?: string | null;
 }
 
 interface PreparedMove extends RescheduleMove {
@@ -98,7 +99,9 @@ function eventWindow(start: string, end: string, timezone: string) {
 }
 
 function calendarTimestamp(value: string, timezone: string): number {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return Date.parse(`${value}T00:00:00Z`);
+  // An all-day date is midnight in the event's timezone, not UTC — otherwise
+  // conflict arithmetic shifts by the UTC offset and misses real overlaps.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return calendarTimestamp(`${value}T00:00:00`, timezone);
   if (/Z$|[+-]\d{2}:?\d{2}$/.test(value)) return Date.parse(value);
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/);
   if (!match) return Date.parse(value);
@@ -183,6 +186,25 @@ async function prepareMoves(port: CalendarPort, moves: RescheduleMove[], timezon
   }));
 }
 
+/** Find the first busy event overlapping any of the given windows, or undefined when every window is free. */
+async function busyConflict<TWindow extends { startMs: number; endMs: number }>(
+  port: CalendarPort,
+  windows: TWindow[],
+  ignoredIds: Set<string>,
+  timezone: string,
+): Promise<{ window: TWindow; event: CalendarEventData } | undefined> {
+  const minStart = Math.min(...windows.map((window) => window.startMs));
+  const maxEnd = Math.max(...windows.map((window) => window.endMs));
+  const existing = await port.listEvents({ timeMin: new Date(minStart).toISOString(), timeMax: new Date(maxEnd).toISOString() });
+  for (const event of existing) {
+    if (!event.id || ignoredIds.has(event.id) || event.status === "cancelled" || event.transparency === "transparent") continue;
+    const bounds = eventBounds(event, timezone);
+    const window = bounds && windows.find((candidate) => overlaps(candidate, bounds));
+    if (window) return { window, event };
+  }
+  return undefined;
+}
+
 async function validateMovePlan(
   port: CalendarPort,
   prepared: PreparedMove[],
@@ -200,19 +222,12 @@ async function validateMovePlan(
   }
 
   const ignoredIds = new Set([...prepared.map((move) => move.eventId), ...duplicateIds]);
-  const minStart = Math.min(...prepared.map((move) => move.startMs));
-  const maxEnd = Math.max(...prepared.map((move) => move.endMs));
-  const existing = await port.listEvents({ timeMin: new Date(minStart).toISOString(), timeMax: new Date(maxEnd).toISOString() });
-  for (const event of existing) {
-    if (!event.id || ignoredIds.has(event.id) || event.status === "cancelled" || event.transparency === "transparent") continue;
-    const bounds = eventBounds(event, timezone);
-    const conflict = bounds && prepared.find((move) => overlaps(move, bounds));
-    if (conflict) throw new Error(`Move for ${conflict.eventId} conflicts with existing event ${event.id}. Choose a free time.`);
-  }
+  const conflict = await busyConflict(port, prepared, ignoredIds, timezone);
+  if (conflict) throw new Error(`Move for ${conflict.window.eventId} conflicts with existing event ${conflict.event.id}. Choose a free time.`);
 
   const groups = new Map<string, PreparedMove[]>();
   for (const move of prepared) {
-    const groupName = move.sequenceGroup ?? inferredSequenceGroup(move.original.summary);
+    const groupName = move.sequenceGroup === null ? undefined : move.sequenceGroup ?? inferredSequenceGroup(move.original.summary);
     if (!groupName || !sequencePosition(move.original.summary)) continue;
     const groupedMove = { ...move, sequenceGroup: groupName };
     const key = groupName.toLocaleLowerCase();
@@ -427,7 +442,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
                     event_id: { type: "string", description: "Exact event ID from search_calendar." },
                     new_start: { type: "string", description: "New ISO 8601 date-time or YYYY-MM-DD." },
                     new_end: { type: "string", description: "New end. It must preserve the event's original duration." },
-                    sequence_group: { type: ["string", "null"], description: "Shared course or sequence name, such as the non-personal title prefix. Null for independent events." },
+                    sequence_group: { type: ["string", "null"], description: "Shared course or sequence name, such as the non-personal title prefix. Null marks the event independent and disables title-based sequence inference." },
                   },
                   required: ["event_id", "new_start", "new_end", "sequence_group"],
                   additionalProperties: false,
@@ -454,7 +469,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
             const newStart = stringValue(record.new_start);
             const newEnd = stringValue(record.new_end);
             if (!eventId || !newStart || !newEnd) throw new Error("Every move requires event_id, new_start, and new_end.");
-            return { eventId, newStart, newEnd, sequenceGroup: stringValue(record.sequence_group) };
+            return { eventId, newStart, newEnd, sequenceGroup: record.sequence_group === null ? null : stringValue(record.sequence_group) };
           });
           const duplicateIds = stringArray(args.duplicate_event_ids);
           if (new Set(duplicateIds).size !== duplicateIds.length) throw new Error("Each duplicate event ID can appear only once.");
@@ -498,7 +513,12 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           const timezone = stringValue(args.timezone) ?? context.config.timezone;
           if (!title || !start || !end) throw new Error("Event title, start, and end are required.");
 
-          const { startValue, endValue } = eventWindow(start, end, timezone);
+          const { startValue, endValue, startMs, endMs } = eventWindow(start, end, timezone);
+          // Timed events must land on free time; all-day events coexist with the day's schedule.
+          if (!startValue.date) {
+            const conflict = await busyConflict(port, [{ startMs, endMs }], new Set(), timezone);
+            if (conflict) throw new Error(`That time conflicts with existing event ${conflict.event.id}${conflict.event.summary ? ` (${conflict.event.summary})` : ""}. Choose a free time.`);
+          }
           const attendees = stringArray(args.attendees).map((email) => ({ email: cleanHeader(email) }));
           const event = await port.insertEvent(
             {
@@ -565,7 +585,11 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           const requestBody: JsonObject = {};
           if (typeof args.title === "string") requestBody.summary = args.title;
           if (newStart && newEnd) {
-            const { startValue, endValue } = eventWindow(newStart, newEnd, timezone);
+            const { startValue, endValue, startMs, endMs } = eventWindow(newStart, newEnd, timezone);
+            if (!startValue.date) {
+              const conflict = await busyConflict(port, [{ startMs, endMs }], new Set([eventId]), timezone);
+              if (conflict) throw new Error(`That time conflicts with existing event ${conflict.event.id}${conflict.event.summary ? ` (${conflict.event.summary})` : ""}. Choose a free time.`);
+            }
             requestBody.start = startValue;
             requestBody.end = endValue;
           }

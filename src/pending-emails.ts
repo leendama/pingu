@@ -41,26 +41,37 @@ export async function markPendingEmailReviewed(spaceId: string, draftId: string)
   });
 }
 
+/** Abandoned drafts are dropped this long after creation; until then review_gmail_draft can re-arm them. */
+export const PENDING_EMAIL_TTL_MS = 24 * 60 * 60 * 1000;
+
 export async function consumePendingEmailConfirmation(
   spaceId: string,
-  text: string,
+  text: string | readonly string[],
   now = Date.now(),
 ): Promise<{ pending?: PendingEmail; confirmedDraftId?: string }> {
+  const texts = typeof text === "string" ? [text] : text;
   return store.update<{ pending?: PendingEmail; confirmedDraftId?: string }>((pending) => {
     const email = pending[spaceId];
     if (!email) return { result: {}, changed: false };
+    const createdAt = Date.parse(email.createdAt);
+    if (Number.isFinite(createdAt) && now - createdAt > PENDING_EMAIL_TTL_MS) {
+      delete pending[spaceId];
+      return { result: {}, changed: true };
+    }
     const reviewedAt = email.reviewedAt ? Date.parse(email.reviewedAt) : Number.NaN;
     const eligible = email.awaitingConfirmation === true
       && Number.isFinite(reviewedAt)
       && now >= reviewedAt
       && now - reviewedAt <= 30 * 60 * 1000;
+    const wasAwaiting = email.awaitingConfirmation === true;
     email.awaitingConfirmation = false;
     return {
       result: {
         pending: email,
-        confirmedDraftId: eligible && isExplicitEmailConfirmation(text) ? email.draftId : undefined,
+        confirmedDraftId: eligible && texts.some(isExplicitEmailConfirmation) ? email.draftId : undefined,
       },
-      changed: true,
+      // A message while nothing is armed has nothing to disarm — skip the file write.
+      changed: wasAwaiting,
     };
   });
 }

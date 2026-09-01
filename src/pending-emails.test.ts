@@ -1,10 +1,12 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   consumePendingEmailConfirmation,
+  getPendingEmail,
   markPendingEmailReviewed,
+  PENDING_EMAIL_TTL_MS,
   setPendingEmail,
 } from "./pending-emails.js";
 
@@ -60,5 +62,29 @@ describe("pending email confirmation", () => {
     await markPendingEmailReviewed("expired", "draft-expired");
     const result = await consumePendingEmailConfirmation("expired", "yes", Date.now() + 31 * 60 * 1000);
     expect(result.confirmedDraftId).toBeUndefined();
+  });
+
+  it("accepts a confirmation inside a burst of consecutive messages", async () => {
+    await storeDraft("burst");
+    await markPendingEmailReviewed("burst", "draft-burst");
+    const result = await consumePendingEmailConfirmation("burst", ["send it", "also grab milk on the way home"]);
+    expect(result.confirmedDraftId).toBe("draft-burst");
+  });
+
+  it("sweeps an abandoned draft after its time-to-live", async () => {
+    await storeDraft("abandoned");
+    await markPendingEmailReviewed("abandoned", "draft-abandoned");
+    const result = await consumePendingEmailConfirmation("abandoned", "yes", Date.now() + PENDING_EMAIL_TTL_MS + 1000);
+    expect(result).toEqual({});
+    expect(await getPendingEmail("abandoned")).toBeUndefined();
+  });
+
+  it("skips the file write when no confirmation window is armed", async () => {
+    await storeDraft("quiet");
+    await consumePendingEmailConfirmation("quiet", "first unrelated message");
+    const before = await stat(join(dataDirectory, "pending-emails.json"));
+    await consumePendingEmailConfirmation("quiet", "second unrelated message");
+    const after = await stat(join(dataDirectory, "pending-emails.json"));
+    expect(after.ino).toBe(before.ino);
   });
 });

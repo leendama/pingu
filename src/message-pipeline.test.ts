@@ -166,6 +166,13 @@ describe("message pipeline", () => {
     const deps = dependencies();
     deps.generateReply.mockImplementation(async () => "Sent");
     await createMessageProcessor(deps)(directSpace(), replyMessage("send it", "Here’s the full draft"));
-    expect(deps.consumeEmailConfirmation).toHaveBeenCalledWith("chat", "send it");
+    expect(deps.consumeEmailConfirmation).toHaveBeenCalledWith("chat", ["send it"]);
+  });
+
+  it("matches each message of a burst against the confirmation, not the combined prose", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "Sent");
+    await createMessageProcessor(deps)(directSpace(), [inboundMessage("send it"), inboundMessage("also grab milk")]);
+    expect(deps.consumeEmailConfirmation).toHaveBeenCalledWith("chat", ["send it", "also grab milk"]);
   });
 });

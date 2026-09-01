@@ -9,9 +9,8 @@ describe("agent starter", () => {
   it("starts once and refuses while running", async () => {
     const startAgent = vi.fn(async () => pendingAgent());
     const start = createAgentStarter({ buildSettings: () => ({}), startAgent, onExit: vi.fn() });
-    expect(start()).toEqual({ started: true });
-    await Promise.resolve();
-    expect(start()).toEqual({ started: false, reason: "already-running" });
+    await expect(start()).resolves.toEqual({ started: true });
+    await expect(start()).resolves.toEqual({ started: false, reason: "already-running" });
     expect(startAgent).toHaveBeenCalledOnce();
   });
 
@@ -25,33 +24,37 @@ describe("agent starter", () => {
       startAgent: vi.fn(async () => pendingAgent()),
       onExit: vi.fn(),
     });
-    expect(start()).toEqual({
+    await expect(start()).resolves.toEqual({
       started: false,
       reason: "invalid-settings",
       message: "Google must be connected before the assistant can start.",
     });
     valid = true;
-    expect(start()).toEqual({ started: true });
+    await expect(start()).resolves.toEqual({ started: true });
   });
 
-  it("releases the latch and reports when startup rejects", async () => {
+  it("reports a startup rejection to the caller and stays retryable", async () => {
     const onExit = vi.fn();
     let attempts = 0;
     const start = createAgentStarter({
       buildSettings: () => ({}),
       startAgent: async () => {
         attempts += 1;
-        if (attempts === 1) throw new Error("network down");
+        if (attempts === 1) throw new Error("Photon authentication failed");
         return pendingAgent();
       },
       onExit,
     });
-    expect(start()).toEqual({ started: true });
-    await vi.waitFor(() => expect(onExit).toHaveBeenCalledWith(new Error("network down")));
-    expect(start()).toEqual({ started: true });
+    await expect(start()).resolves.toEqual({
+      started: false,
+      reason: "startup-failed",
+      message: "Photon authentication failed",
+    });
+    expect(onExit).not.toHaveBeenCalled();
+    await expect(start()).resolves.toEqual({ started: true });
   });
 
-  it("reports runtime completion and failure through onExit", async () => {
+  it("reports runtime completion and failure through onExit only after a successful start", async () => {
     const onExit = vi.fn();
     let finish!: () => void;
     const start = createAgentStarter({
@@ -59,8 +62,7 @@ describe("agent starter", () => {
       startAgent: async () => ({ done: new Promise<void>((resolve) => { finish = resolve; }) }),
       onExit,
     });
-    expect(start()).toEqual({ started: true });
-    await vi.waitFor(() => expect(typeof finish).toBe("function"));
+    await expect(start()).resolves.toEqual({ started: true });
     finish();
     await vi.waitFor(() => expect(onExit).toHaveBeenCalledWith());
   });

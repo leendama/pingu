@@ -54,7 +54,7 @@ function setup(config?: AssistantConfig, message = ""): string {
   ${config && !config.google.refreshToken ? `<a class="button" href="/auth/google">Connect Google</a>` : ""}${config?.google.refreshToken ? "<p class=\"status\">Google is connected. Pingu is ready.</p>" : ""}`);
 }
 
-export function createSetupServer(onReady: (config: AssistantConfig) => StartOutcome) {
+export function createSetupServer(onReady: (config: AssistantConfig) => Promise<StartOutcome>) {
   const app = express();
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(express.urlencoded({ extended: false, limit: "32kb" }));
@@ -76,7 +76,11 @@ export function createSetupServer(onReady: (config: AssistantConfig) => StartOut
     next();
   });
   app.get(["/", "/setup"], async (request, response) => {
-    const message = request.query.restart === "1" ? "Saved. Restart the app to apply these settings." : "";
+    const message = typeof request.query.failed === "string"
+      ? `Google connected, but the assistant could not start: ${request.query.failed.slice(0, 300)}`
+      : request.query.restart === "1"
+        ? "Saved. Restart the app to apply these settings."
+        : "";
     response.send(setup(await loadConfig().catch(() => undefined), message));
   });
   app.post("/setup/save", async (request, response) => {
@@ -90,14 +94,14 @@ export function createSetupServer(onReady: (config: AssistantConfig) => StartOut
         granolaApiKey: body.granolaApiKey || existing?.granolaApiKey || undefined,
         google: { clientId: body.googleClientId, clientSecret: body.googleClientSecret || existing?.google.clientSecret, refreshToken: body.googleClientId === existing?.google.clientId ? existing?.google.refreshToken : undefined },
       });
-      const outcome = config.google.refreshToken ? onReady(config) : undefined;
+      const outcome = config.google.refreshToken ? await onReady(config) : undefined;
       const message = !outcome
         ? "Saved. Connect Google to finish."
         : outcome.started
           ? "Saved and running."
-          : outcome.reason === "invalid-settings"
-            ? `Saved, but the assistant could not start: ${outcome.message}`
-            : "Saved. Restart the app to apply these settings.";
+          : outcome.reason === "already-running"
+            ? "Saved. Restart the app to apply these settings."
+            : `Saved, but the assistant could not start: ${outcome.message}`;
       response.send(setup(config, message));
     } catch (error) {
       const message = error instanceof ZodError ? error.issues.map((issue) => issue.message).join(" ") : error instanceof Error ? error.message : "Setup failed.";
@@ -125,8 +129,14 @@ export function createSetupServer(onReady: (config: AssistantConfig) => StartOut
       const refreshToken = tokens.refresh_token || config.google.refreshToken;
       if (!refreshToken) throw new Error("Google did not return a refresh token. Remove the app from Google account access and try again.");
       const updated = await saveConfig({ ...config, google: { ...config.google, refreshToken } });
-      const outcome = onReady(updated);
-      response.redirect(outcome.started ? "/setup" : "/setup?restart=1");
+      const outcome = await onReady(updated);
+      response.redirect(
+        outcome.started
+          ? "/setup"
+          : outcome.reason === "already-running"
+            ? "/setup?restart=1"
+            : `/setup?failed=${encodeURIComponent(outcome.message.slice(0, 300))}`,
+      );
     } catch (error) {
       response.status(400).send(page(`<h1>Google connection failed</h1><p class="status warn">${escapeHtml(error instanceof Error ? error.message : "Unknown error")}</p><a class="button" href="/setup">Back</a>`));
     }

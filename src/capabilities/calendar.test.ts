@@ -127,6 +127,41 @@ describe("calendarPlugin", () => {
     expect(calls).toEqual([{ method: "delete", eventId: "evt-9", sendUpdates: "all" }]);
   });
 
+  it("changes and verifies an event colour from a plain colour name", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [{ id: "evt-color", summary: "Focus" }]));
+    const result = await plugin.run(
+      "set_calendar_event_color",
+      JSON.stringify({ event_id: "evt-color", color: "red" }),
+      context,
+    );
+    expect(JSON.parse(result.output)).toEqual({ recolored: true, event_id: "evt-color", color_id: "11" });
+    expect(calls).toContainEqual({
+      method: "patch",
+      eventId: "evt-color",
+      requestBody: { colorId: "11" },
+      sendUpdates: "none",
+    });
+  });
+
+  it("copies an exact Google event colour ID and rejects unsupported colours", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [{ id: "evt-color", summary: "Focus" }]));
+    const copied = await plugin.run(
+      "set_calendar_event_color",
+      JSON.stringify({ event_id: "evt-color", color: "7" }),
+      context,
+    );
+    expect(JSON.parse(copied.output).color_id).toBe("7");
+
+    const invalid = await plugin.run(
+      "set_calendar_event_color",
+      JSON.stringify({ event_id: "evt-color", color: "ultraviolet" }),
+      context,
+    );
+    expect(JSON.parse(invalid.output).error).toMatch(/Unsupported event colour/);
+  });
+
   it("rejects a single move that overlaps an existing event", async () => {
     const calls: RecordedCall[] = [];
     const plugin = calendarPlugin(fakePort(calls, [
@@ -198,7 +233,7 @@ describe("calendarPlugin", () => {
 
   it("declares only search_calendar as read-only and every tool as private", () => {
     const plugin = calendarPlugin(fakePort([]));
-    expect(plugin.sideEffectingTools).toEqual(["delete_calendar_event", "reschedule_calendar_event", "bulk_reschedule_calendar_events", "create_calendar_event", "edit_calendar_event"]);
-    expect(plugin.privateTools).toEqual(["search_calendar", "delete_calendar_event", "reschedule_calendar_event", "bulk_reschedule_calendar_events", "create_calendar_event", "edit_calendar_event"]);
+    expect(plugin.sideEffectingTools).toEqual(["set_calendar_event_color", "delete_calendar_event", "reschedule_calendar_event", "bulk_reschedule_calendar_events", "create_calendar_event", "edit_calendar_event"]);
+    expect(plugin.privateTools).toEqual(["set_calendar_event_color", "search_calendar", "delete_calendar_event", "reschedule_calendar_event", "bulk_reschedule_calendar_events", "create_calendar_event", "edit_calendar_event"]);
   });
 });

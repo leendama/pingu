@@ -12,6 +12,7 @@ export interface CalendarEventData {
   htmlLink?: string | null;
   status?: string | null;
   transparency?: string | null;
+  colorId?: string | null;
 }
 
 export interface CalendarPort {
@@ -41,6 +42,41 @@ interface PreparedMove extends RescheduleMove {
   endValue: CalendarTime;
   startMs: number;
   endMs: number;
+}
+
+const eventColorIds: Record<string, string> = {
+  lavender: "1",
+  sage: "2",
+  grape: "3",
+  purple: "3",
+  flamingo: "4",
+  pink: "4",
+  banana: "5",
+  yellow: "5",
+  tangerine: "6",
+  orange: "6",
+  peacock: "7",
+  cyan: "7",
+  teal: "7",
+  graphite: "8",
+  grey: "8",
+  gray: "8",
+  blueberry: "9",
+  blue: "9",
+  basil: "10",
+  green: "10",
+  tomato: "11",
+  red: "11",
+};
+
+function eventColorId(value: string): string {
+  const normalized = value.trim().toLocaleLowerCase();
+  if (/^(?:[1-9]|10|11)$/.test(normalized)) return normalized;
+  const colorId = eventColorIds[normalized];
+  if (!colorId) {
+    throw new Error("Unsupported event colour. Use lavender, sage, purple, pink, yellow, orange, teal, grey, blue, green, red, or a Google event colour ID from 1 to 11.");
+  }
+  return colorId;
 }
 
 function calendarDateTime(value: string, timezone: string): { date?: string; dateTime?: string; timeZone?: string } {
@@ -249,8 +285,36 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
 
 export function calendarPlugin(port: CalendarPort): PinguPlugin {
   return capabilityPlugin(
-    { id: "calendar", name: "Google Calendar", description: "Search, create, move, edit, and delete events." },
+    { id: "calendar", name: "Google Calendar", description: "Search, create, move, recolour, edit, and delete events." },
     [
+      {
+        schema: {
+          type: "function",
+          name: "set_calendar_event_color",
+          description: "Change one existing event's colour. Search first and use the exact event ID. To match another event, pass that event's colorId from search_calendar.",
+          strict: true,
+          parameters: {
+            type: "object",
+            properties: {
+              event_id: { type: "string", description: "Exact Google Calendar event ID returned by search_calendar." },
+              color: { type: "string", description: "Colour name (lavender, sage, purple, pink, yellow, orange, teal, grey, blue, green, or red) or exact Google event colour ID 1 through 11." },
+            },
+            required: ["event_id", "color"],
+            additionalProperties: false,
+          },
+        },
+        run: async (args) => {
+          const eventId = stringValue(args.event_id);
+          const color = stringValue(args.color);
+          if (!eventId || !color) throw new Error("Event ID and colour are required.");
+          if (!await port.getEvent(eventId)) throw new Error(`Calendar event ${eventId} was not found.`);
+          const colorId = eventColorId(color);
+          await port.patchEvent(eventId, { colorId }, "none");
+          const verified = await port.getEvent(eventId);
+          if (!verified || verified.colorId !== colorId) throw new Error(`Calendar did not verify the colour change for ${eventId}.`);
+          return { output: JSON.stringify({ recolored: true, event_id: eventId, color_id: colorId }) };
+        },
+      },
       {
         schema: {
           type: "function",

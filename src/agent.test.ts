@@ -22,6 +22,7 @@ describe("agent wiring", () => {
     expect(instructions).toContain("2 to 12 words");
     expect(instructions).toContain("do not guess or act");
     expect(instructions).toContain("Never hide or ignore a failed tool call");
+    expect(instructions).toContain("set_calendar_event_color");
   });
 
   it("replays recoverable failures only before an action starts", () => {

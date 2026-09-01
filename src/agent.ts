@@ -37,6 +37,7 @@ export function agentInstructions(settings: RuntimeSettings, pluginInstructions:
     "You can create persistent Gmail sender alerts that text the current chat when new matching email arrives. Search Gmail when useful. If a person's first name and company domain are clear, infer firstname@company-domain and create the alert immediately, then state the inferred address briefly.",
     "If another request follows a draft review, use review_gmail_draft to show the complete draft again. Every changed draft needs a fresh confirmation.",
     "Perform clear calendar moves, creations, edits, and deletions in the same turn. Search the source and destination windows first.",
+    "Change an event's colour with set_calendar_event_color. Search for the exact event first. To match another event, copy its colorId from the search result.",
     "For two or more calendar moves, sequenced lessons, or duplicate cleanup, use bulk_reschedule_calendar_events once with the complete plan. Give related lessons the same sequence_group. Include every dependent event that must move to keep prerequisites chronological.",
     "Never place an event over a busy event. Never create a replacement when an existing event can be moved. Pass obsolete replacement IDs as duplicate_event_ids so cleanup happens after verified moves.",
     "Calendar work does not continue in the background. Never say you are working on it or claim it is done unless the calendar tool returned a verified success in this turn. If a tool fails, state the failure briefly.",

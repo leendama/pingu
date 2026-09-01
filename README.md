@@ -93,4 +93,4 @@ This runs the type checks, tests, and production build.
 
 ## Current safety boundary
 
-Calendar creation, moves, edits, deletions, and Gmail drafting happen straight away when the request is clear. Email sending requires a delivered draft and confirmation in the next message. Gmail, Calendar, and Granola stay private in group chats. Granola editing is currently unavailable.
+Calendar creation, moves, edits, deletions, and Gmail drafting happen straight away when the request is clear. Pingu asks one short question when a request is ambiguous and sends a visible notice when an action or reply fails. Email sending requires a delivered draft and confirmation in the next message. Gmail, Calendar, and Granola stay private in group chats. Granola editing is currently unavailable.

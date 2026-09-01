@@ -86,7 +86,19 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
     const messages = Array.isArray(input) ? input : [input];
     if (messages.length === 0) return;
     const message = messages.at(-1)!;
-    if (messages.some((item) => !inboundMessageText(item))) return;
+    if (messages.some((item) => !inboundMessageText(item))) {
+      const failure = "I couldn't read that message. Send it as text and I'll handle it.";
+      try {
+        if (spaceKind(space) === "group") await message.reply(markdown(failure));
+        else await space.send(markdown(failure));
+      } catch (error) {
+        console.error("Unable to deliver the unreadable-message notice:", {
+          name: error instanceof Error ? error.name : "UnknownError",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
+    }
 
     const inboundText = combineInboundMessages(messages);
     const isGroup = spaceKind(space) === "group";
@@ -114,7 +126,7 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
     }
 
     let progressPromise: Promise<Message | undefined> | undefined;
-    let deliveryAttempted = false;
+    let deliverySucceeded = false;
     const progressTimer = setTimeout(() => {
       progressPromise = space.send("One sec…");
     }, dependencies.progressDelayMs ?? 4_000);
@@ -138,15 +150,13 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       }
 
       if (progressMessage) {
-        deliveryAttempted = true;
         await progressMessage.edit(markdown(reply));
       } else if (isGroup) {
-        deliveryAttempted = true;
         await message.reply(markdown(reply));
       } else {
-        deliveryAttempted = true;
         await space.send(markdown(reply));
       }
+      deliverySucceeded = true;
 
       if (context.draftForReview) {
         await dependencies.markEmailReviewed(space.id, context.draftForReview);
@@ -157,13 +167,34 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
         name: error instanceof Error ? error.name : "UnknownError",
         message: error instanceof Error ? error.message : String(error),
       });
-      if (!context.richResponseSent && !deliveryAttempted) {
+      if (!context.richResponseSent && !deliverySucceeded) {
         const failure = context.sideEffectAttempted
-          ? "I hit a problem after starting that action, so I didn't retry it automatically. Check its current state before trying again."
-          : "I couldn't respond just now. I've logged the actual cause. Give it one more go.";
+          ? "That failed after I started it. I didn't retry the action. Check its current state before trying again."
+          : "That failed before I could finish. Try again, or give me any missing detail.";
         const progressMessage = progressPromise ? await progressPromise.catch(() => undefined) : undefined;
-        if (progressMessage) await progressMessage.edit(failure);
-        else await space.send(failure);
+        let failureDelivered = false;
+        if (progressMessage) {
+          try {
+            await progressMessage.edit(markdown(failure));
+            failureDelivered = true;
+          } catch (deliveryError) {
+            console.error("Unable to replace the progress message with a failure notice:", {
+              name: deliveryError instanceof Error ? deliveryError.name : "UnknownError",
+              message: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
+            });
+          }
+        }
+        if (!failureDelivered) {
+          try {
+            if (isGroup) await message.reply(markdown(failure));
+            else await space.send(markdown(failure));
+          } catch (deliveryError) {
+            console.error("Unable to deliver the fallback failure notice:", {
+              name: deliveryError instanceof Error ? deliveryError.name : "UnknownError",
+              message: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
+            });
+          }
+        }
       }
     }
   };

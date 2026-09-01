@@ -38,7 +38,15 @@ function replyMessage(replyText: string, targetText: string): Message {
   } as unknown as Message;
 }
 
-function directSpace(send = vi.fn(async () => undefined)): Space {
+function unreadableVoiceMessage(): Message {
+  return {
+    direction: "inbound",
+    content: { type: "voice", url: "voice-placeholder" },
+    reply: vi.fn(async () => undefined),
+  } as unknown as Message;
+}
+
+function directSpace(send: (content: unknown) => Promise<unknown> = vi.fn(async (_content: unknown) => undefined)): Space {
   return {
     id: "chat",
     type: "dm",
@@ -46,6 +54,11 @@ function directSpace(send = vi.fn(async () => undefined)): Space {
     responding: async (operation: () => Promise<string>) => operation(),
     send,
   } as unknown as Space;
+}
+
+async function sentContentText(send: ReturnType<typeof vi.fn>, callIndex: number): Promise<string> {
+  const content = send.mock.calls[callIndex]?.[0] as { build?: () => Promise<unknown> } | undefined;
+  return JSON.stringify(content?.build ? await content.build() : content);
 }
 
 function dependencies() {
@@ -75,10 +88,28 @@ describe("message pipeline", () => {
 
   it("does not arm confirmation after a delivery rejection", async () => {
     const deps = dependencies();
-    const send = vi.fn(async () => { throw new Error("delivery failed"); });
+    const send = vi.fn(async (_content: unknown) => { throw new Error("delivery failed"); });
     await createMessageProcessor(deps)(directSpace(send), inboundMessage());
-    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(await sentContentText(send, 1)).toContain("That failed before I could finish");
     expect(deps.markEmailReviewed).not.toHaveBeenCalled();
+  });
+
+  it("sends a visible failure when reply generation fails", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockRejectedValue(new Error("model unavailable"));
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor(deps)(directSpace(send), inboundMessage("move the event"));
+    expect(send).toHaveBeenCalledOnce();
+    expect(await sentContentText(send, 0)).toContain("That failed before I could finish");
+  });
+
+  it("does not silently ignore an unreadable inbound message", async () => {
+    const deps = dependencies();
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor(deps)(directSpace(send), unreadableVoiceMessage());
+    expect(deps.generateReply).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("couldn't read that message");
   });
 
   it("fails closed for an unknown conversation type", () => {

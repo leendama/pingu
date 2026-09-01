@@ -20,6 +20,8 @@ describe("agent wiring", () => {
     expect(instructions).toContain("Plugin instruction");
     expect(instructions).toContain("fewest words possible");
     expect(instructions).toContain("2 to 12 words");
+    expect(instructions).toContain("do not guess or act");
+    expect(instructions).toContain("Never hide or ignore a failed tool call");
   });
 
   it("replays recoverable failures only before an action starts", () => {

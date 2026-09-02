@@ -1,87 +1,124 @@
 # Pingu - personal assistant on iMessage
 
-<img width="150" height="300" alt="image" src="https://github.com/user-attachments/assets/7c580305-9671-44cb-ad26-16c2f2d12cc9" />
+[![CI](https://github.com/leendama/pingu/actions/workflows/ci.yml/badge.svg)](https://github.com/leendama/pingu/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Node 22+](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](package.json)
+[![Self-hosted](https://img.shields.io/badge/hosting-self--hosted-6b4fbb.svg)](docs/SETUP.md)
+
+<img width="150" height="300" alt="Pingu" src="https://github.com/user-attachments/assets/7c580305-9671-44cb-ad26-16c2f2d12cc9" />
 
 Noot noot!
 
-This is a free personal iMessage assistant built with Photon and the OpenAI Responses API. It remembers conversations and connects to Google Calendar, Gmail, and Granola. It can also text you when a new email arrives from a chosen sender.
+Pingu is a self-hosted assistant you text on iMessage. It reads and manages your Google Calendar, searches and drafts Gmail, reads Granola meeting notes, keeps reminders, and texts you when a chosen sender emails. Other people can text the same number to see when you are free and ask for a meeting, which you approve with one reply.
 
-<img width="256" height="580" alt="image" src="https://github.com/user-attachments/assets/80ac66c3-6933-439a-b519-313124530d43" />
+<img width="256" height="580" alt="Pingu on iMessage" src="https://github.com/user-attachments/assets/80ac66c3-6933-439a-b519-313124530d43" />
 
+## What it does
 
+**For you, the owner**
 
-Pingu can handle:
-- Reminders
-- Tapbacks
-- Read receipts
-- Typing indicators
-- Polls
-- Rich links
-- Contact cards
-- Voice replies
-- Threaded group replies (Photon premium needed)
-- Group controls (Photon premium needed)
+- Calendar: search, create, move, recolour, edit, and delete events. Moves are conflict-aware and verified.
+- Gmail: search, read full messages, draft, and send after you confirm the exact draft.
+- Email alerts: a text when a chosen sender emails you.
+- Granola: list and read meeting notes.
+- Reminders, tapbacks, read receipts, typing indicators, polls, rich links, contact cards, voice replies.
+- Threaded group replies and group controls (Photon premium).
+
+**For anyone else who texts the number**
+
+- A one-line introduction on first contact.
+- Your free windows for a day, inside the hours you allow, at most five, never with event details.
+- A meeting request with a purpose and an email for the invite. Nothing is booked until you reply **yes** to the request text. Then Pingu creates the event, adds a Google Meet link, emails the invite, and tells both of you.
+- Cancelling their own booking, which tells you.
+- Reminders and ordinary chat, within daily limits.
+
+## How Pingu compares
+
+| | Pingu | OpenClaw | QwenPaw | OpenHuman | OpenYak | NativeMind |
+|---|---|---|---|---|---|---|
+| Where you talk to it | iMessage | iMessage, WhatsApp, Telegram, Signal, Discord, Slack | iMessage, Telegram, Discord, DingTalk, WeChat | Desktop app | Desktop app | Browser sidebar |
+| Native message features | Tapbacks, polls, rich links, contact cards, voice | Text and attachments | Text and attachments | n/a | n/a | n/a |
+| Others can use your assistant | Yes: free windows and meeting requests you approve | Team deployment | Not documented | No | No | No |
+| Unknown senders | Anyone can chat; a claim code proves the owner | Pairing code | Access policy levels | n/a | n/a | n/a |
+| Model | OpenAI, or tested Responses-compatible endpoints (Ollama, LM Studio) | Hosted and local | 14+ cloud, local | Routing, BYOK, Ollama | 20+ BYOK, local | Ollama, WebLLM |
+| Zero-cloud mode | No, iMessage is relayed by Photon | Yes | Yes | Yes | Yes | Always |
+| Memory | Local transcripts, retention setting, delete actions | Local | Local Markdown | SQLite and vault | Local | Page context |
+| Install | Docker Compose plus a browser wizard | Installer plus gateway setup | pip, script, Docker | Installers | Installers | Chrome Web Store |
+| License | Apache-2.0 | MIT | Apache-2.0 | GPL-3.0 | Apache-2.0 | AGPL-3.0 |
+
+## Where your data goes
+
+Pingu stores its state and conversation history on your machine. Messages are relayed through Photon, and prompts plus the connector results they need are sent to the model provider you configure. Point the model at Ollama or LM Studio and the model part stays on your hardware. Nothing about your calendar or email reaches a guest beyond the free windows you allow. [PRIVACY.md](PRIVACY.md) has the full picture, including what each party can see and how to delete everything.
 
 ## Set it up
 
-You need Node.js 22 or newer.
-
-You also need a (1) Photon project (2) Google account and (3) an OpenAI API key. Granola connection is optional.
-
-1. Install the dependencies:
+You need Node.js 22 or newer, a [Photon](https://app.photon.codes) project with an iMessage line, a Google account, and either an OpenAI API key or a local model that supports function calling.
 
 ```sh
 npm install
+cp .env.example .env    # add PROJECT_ID, PROJECT_SECRET, OPENAI_API_KEY
+npm run connect:google  # after creating a Google OAuth desktop client, see docs/SETUP.md
+npm run start
 ```
 
-2. Copy `.env.example` to `.env`. You can keep it elsewhere and set `PINGU_ENV_FILE` to its full path.
-
-3. Add these values from the [Photon dashboard](https://app.photon.codes):
-
-- `PROJECT_ID`
-- `PROJECT_SECRET`
-- `OPENAI_API_KEY`
-
-By default, the assistant uses `gpt-5.6-luna`. Voice notes use `gpt-4o-mini-tts`.
-
-## Connect Google
-
-1. In Google Cloud, enable the Google Calendar API and Gmail API.
-2. Create an OAuth desktop client. Save it as `credentials.json`, or set `GOOGLE_CREDENTIALS_PATH` to its full path.
-3. Connect your account:
+Then prove you are the owner:
 
 ```sh
-npm run connect:google
+npm run claim           # prints a code such as PINGU-4F7K2Q
 ```
 
-Your Google token is saved under `PHOTON_DATA_DIR`, or in `data/google-token.json` when no external data directory is set. The assistant can read Calendar, create events, move one event or a whole sequence without calendar clashes, clean up duplicate events, change event colours, edit events, search Gmail, read complete email bodies, and create drafts. It sends email after showing the full draft and receiving confirmation in your next message.
+Text that code to your Pingu number from your own phone within an hour. That number is recorded as the owner by the exact id the platform reports, and private tools switch on in that chat. Until someone claims, every sender is a guest.
 
-## Connect Granola
+For an always-on host, `docker compose up -d` and the browser wizard at `/setup` do the same job, including the claim code. [docs/SETUP.md](docs/SETUP.md) walks through Google Cloud with the one warning that catches most people: an OAuth app left in **Testing** issues sign-ins that expire after seven days. Publish it.
 
-Add a Granola Personal or Enterprise API key to `.env`:
+Check any setup with:
 
-```dotenv
-GRANOLA_API_KEY=your_granola_api_key
+```sh
+npm run doctor
 ```
 
-The assistant can now list and read your meeting notes.
+It probes the model endpoint (plain response, function calling, tool continuation, reasoning parameters), the Google sign-in and its permissions, and Granola, and says in plain language what is wrong.
+
+## Models
+
+By default Pingu uses `gpt-5.6-luna` at OpenAI. Set `OPENAI_BASE_URL` to use any OpenAI Responses-compatible endpoint that supports function calling. OpenAI, Ollama, and LM Studio are tested. The wizard and `npm run doctor` run the capability check before Pingu starts, and Pingu refuses to start against an endpoint that cannot call tools.
+
+Inside Docker, `localhost` is the container. A model running on your Mac is `http://host.docker.internal:11434/v1`. A cloud-hosted Pingu cannot reach a model on a laptop that is switched off. Voice replies need OpenAI; the voice tool is simply absent otherwise.
+
+## Guests and limits
+
+Anyone can text the number, so the limits matter:
+
+| Limit | Default | Setting |
+|---|---|---|
+| Messages per unknown sender per day | 20 | `PINGU_GUEST_DAILY_MESSAGE_CAP` |
+| Model tokens all guests may use per day | 300,000 | `PINGU_GUEST_DAILY_TOKEN_BUDGET` |
+| Active reminders per guest | 5 | `PINGU_GUEST_MAX_REMINDERS` |
+| Pending meeting requests per guest | 1 | fixed |
+| Bookable hours | 09:00 to 17:00 weekdays | `PINGU_BOOKABLE_HOURS`, `PINGU_BOOKABLE_DAYS` |
+| Free windows shown per question | 5 | fixed |
+| Buffer between meetings, minimum notice, lookahead | 15 min, 2 h, 14 days | fixed |
+| Request expiry | 24 h | fixed |
+
+The owner is never counted against guest limits. Guest-supplied email addresses are marked unverified in the request you approve.
 
 ## Run
 
 ```sh
-npm install
 npm run start
 ```
 
-Conversation IDs live in `data/conversations.json`. This keeps context across restarts. Remove a conversation entry when you want a fresh chat.
+Everything Pingu remembers lives under `PHOTON_DATA_DIR` (default `data/`): chat transcripts, reminders, alerts, pending drafts, guest counters, verified owners, and booking requests. Reminders need the process running; an overdue one arrives when it starts again. Run one Pingu per data directory.
 
-Reminders live in `data/reminders.json`. Keep the process running to receive them on time. An overdue reminder arrives when the process starts again.
+Forget one chat by asking Pingu to. Delete everything with `npm run reset-data -- --yes` or the button on the setup page; credentials are kept so you are not signed out.
 
-For a clean public checkout, keep `.env`, Google credentials, runtime data, and personal plugins in a separate private directory. Set `PINGU_ENV_FILE`, `GOOGLE_CREDENTIALS_PATH`, `PHOTON_DATA_DIR`, and `PINGU_PLUGIN_DIR` to their full paths.
+## Email signature
+
+Every email Pingu sends ends with "this email was composed by Pingu, noot noot" and a link to this repository. It is part of the product and cannot be switched off.
 
 ## Extensions and verification
 
-Read [docs/PLUGINS.md](docs/PLUGINS.md) to add tools. Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the code layout. Read [docs/SETUP.md](docs/SETUP.md) for browser and Docker setup.
+Read [docs/PLUGINS.md](docs/PLUGINS.md) to add tools, [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the code layout, and [docs/SETUP.md](docs/SETUP.md) for the wizard, Docker, HTTPS, backups, updates, and rollback.
 
 Before contributing, run:
 
@@ -91,6 +128,13 @@ npm run check
 
 This runs the type checks, tests, and production build.
 
-## Current safety boundary
+## Safety boundary
 
-Calendar creation, moves, edits, deletions, and Gmail drafting happen straight away when the request is clear. Pingu asks one short question when a request is ambiguous and sends a visible notice when an action or reply fails. Email sending requires a delivered draft and confirmation in the next message. Gmail, Calendar, and Granola stay private in group chats. Granola editing is currently unavailable.
+- Private Gmail, Calendar, and Granola tools exist only in the verified owner's direct messages. Groups and guests never see them.
+- Email sending needs a delivered draft and your yes in the next message.
+- Deleting a recurring event, an event with attendees, or several events at once needs your yes. A single personal event deletes in one step.
+- Anything Pingu reads from email, meeting notes, or event descriptions is treated as information, never as an instruction. A turn that read such content cannot delete anything without your yes.
+- Every calendar write is read back from Google before Pingu says it is done. If Google rejected it, Pingu says nothing was changed.
+- Guest bookings are created only after your reply, after rechecking the slot.
+
+See [SECURITY.md](SECURITY.md) for the security model and how to report a problem.

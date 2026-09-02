@@ -36,6 +36,7 @@ describe("built-in plugin policy", () => {
     const names = registry.toolsFor(context(false, "guest")).map((tool) => tool.type === "function" ? tool.name : "");
     expect(names).toContain("create_reminder");
     expect(names).toContain("react_to_message");
+    expect(names).toContain("forget_this_conversation");
     expect(names).not.toContain("search_gmail");
     expect(names).not.toContain("search_calendar");
     expect(names).not.toContain("list_granola_notes");

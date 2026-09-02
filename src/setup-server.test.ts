@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StartOutcome } from "./agent-starter.js";
 import { saveConfig, type AssistantConfig } from "./config.js";
+import { markAgentStarted, markReplyDelivered, resetRuntimeStatus } from "./runtime-status.js";
 import { createSetupServer } from "./setup-server.js";
 
 vi.mock("./google.js", () => ({
@@ -28,6 +29,7 @@ const directories: string[] = [];
 const servers: Server[] = [];
 
 afterEach(async () => {
+  resetRuntimeStatus();
   for (const name of ["PHOTON_DATA_DIR", "PHOTON_CONFIG_KEY", "PHOTON_SETUP_TOKEN", "PHOTON_PUBLIC_URL"]) delete process.env[name];
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
@@ -162,6 +164,19 @@ describe("setup save", () => {
     const html = await response.text();
     expect(html).toContain("Saved, but the assistant could not start: Photon authentication failed");
     expect(html).not.toContain("Saved and running.");
+  });
+});
+
+describe("health endpoint privacy", () => {
+  it("reports activity as booleans, never as timestamps", async () => {
+    const { base } = await startServer();
+    markAgentStarted(new Date("2026-09-02T10:00:00Z"));
+    markReplyDelivered(new Date("2026-09-02T10:05:00Z"));
+    const health = await (await fetch(`${base}/healthz`)).json() as Record<string, unknown>;
+    expect(health).toMatchObject({ ok: true, running: true, hasDeliveredReply: true });
+    expect(JSON.stringify(health)).not.toContain("2026-09-02");
+    expect(health.startedAt).toBeUndefined();
+    expect(health.lastReplyAt).toBeUndefined();
   });
 });
 

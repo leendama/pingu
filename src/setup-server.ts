@@ -81,7 +81,16 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
 
   app.get("/healthz", async (_request, response) => {
     const config = await loadConfig().catch(() => undefined);
-    response.json({ ok: true, configured: Boolean(config), googleConnected: Boolean(config?.google.refreshToken), ...runtimeStatus() });
+    // Booleans only: this route is unauthenticated, and exact activity
+    // timestamps are personal. The setup page shows them behind the login.
+    const status = runtimeStatus();
+    response.json({
+      ok: true,
+      configured: Boolean(config),
+      googleConnected: Boolean(config?.google.refreshToken),
+      running: Boolean(status.startedAt),
+      hasDeliveredReply: Boolean(status.lastReplyAt),
+    });
   });
   app.post("/setup/login", (request, response) => {
     const supplied = String((request.body as Record<string, unknown>).token || "");

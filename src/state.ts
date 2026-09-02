@@ -3,7 +3,8 @@ import { dirname } from "node:path";
 import { resolve } from "node:path";
 
 export function dataPath(filename: string): string {
-  return resolve(process.env.PHOTON_DATA_DIR ?? "data", filename);
+  // || not ??: an empty PHOTON_DATA_DIR (e.g. from an untouched .env template) means unset.
+  return resolve(process.env.PHOTON_DATA_DIR || "data", filename);
 }
 
 export class SerialQueue {

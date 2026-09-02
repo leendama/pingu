@@ -4,6 +4,11 @@ services:
     ports:
       - "3000:3000"
     env_file: .env
+    environment:
+      # Pin the data dir onto the named volume; an empty PHOTON_DATA_DIR in
+      # .env would otherwise override the image default and write under /app,
+      # losing configuration when the container is replaced.
+      PHOTON_DATA_DIR: /var/data/photon
     volumes:
       - pingu-data:/var/data/photon
     restart: unless-stopped

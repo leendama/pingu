@@ -37,8 +37,9 @@ const productionProbes: DiagnosticsProbes = {
   },
   googleScopes: (google) => googleGrantedScopes(google),
   googleCalendar: async (google) => {
+    // Must stay callable with only the calendar.events scope Pingu requests.
     const { calendar } = await googleClient(google);
-    await calendar.calendars.get({ calendarId: "primary" });
+    await calendar.events.list({ calendarId: "primary", maxResults: 1 });
   },
   granola: async (apiKey) => {
     await granolaPort(apiKey).listNotes({ pageSize: 1 });

@@ -182,6 +182,20 @@ describe("message pipeline", () => {
     expect(notCalled).not.toHaveBeenCalled();
   });
 
+  it("counts a rich response as a delivered reply", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async (_spaceId, _text, context) => {
+      context.richResponseSent = true;
+      context.draftForReview = undefined;
+      return "suppressed text";
+    });
+    const onReplyDelivered = vi.fn();
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, onReplyDelivered })(directSpace(send), inboundMessage());
+    expect(onReplyDelivered).toHaveBeenCalledOnce();
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("matches each message of a burst against the confirmation, not the combined prose", async () => {
     const deps = dependencies();
     deps.generateReply.mockImplementation(async () => "Sent");

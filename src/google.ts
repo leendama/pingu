@@ -72,9 +72,13 @@ export function googleCalendarPort(credentials?: RuntimeSettings["google"]): Cal
   let cachedTimezone: Promise<string | undefined> | undefined;
   return {
     getTimezone() {
+      // events.list works with the calendar.events scope Pingu requests and
+      // reports the calendar's timezone; calendars.get would need a broader
+      // calendar metadata scope and fail on a healthy connection.
       cachedTimezone ??= (async () => {
         const { calendar } = await googleClient(credentials);
-        return (await calendar.calendars.get({ calendarId: "primary" })).data.timeZone ?? undefined;
+        const result = await calendar.events.list({ calendarId: "primary", maxResults: 1 });
+        return result.data.timeZone ?? undefined;
       })().catch((error) => {
         console.warn("Calendar timezone lookup failed:", error instanceof Error ? error.message : String(error));
         cachedTimezone = undefined;

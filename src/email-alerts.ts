@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
-import type { GmailMessageSummary } from "./capabilities/gmail.js";
+import { startPoller } from "./poller.js";
 import { JsonFileStore } from "./state.js";
+
+/** The email fields an alert delivery needs — a narrow view any Gmail search result satisfies. */
+export interface AlertEmail {
+  id?: string | null;
+  from?: string | null;
+  subject?: string | null;
+  snippet?: string | null;
+}
 
 export interface EmailAlert {
   id: string;
@@ -70,12 +78,12 @@ export const emailAlertStore: EmailAlertStore = {
 
 export async function processEmailAlerts(
   alerts: EmailAlertStore,
-  search: (query: string, maxResults: number) => Promise<GmailMessageSummary[]>,
-  deliver: (alert: EmailAlert, message: GmailMessageSummary) => Promise<void>,
+  search: (query: string, maxResults: number) => Promise<AlertEmail[]>,
+  deliver: (alert: EmailAlert, message: AlertEmail) => Promise<void>,
 ): Promise<void> {
   for (const alert of await alerts.listAll()) {
     const after = Math.floor(Date.parse(alert.createdAt) / 1000);
-    let messages: GmailMessageSummary[];
+    let messages: AlertEmail[];
     try {
       messages = await search(`${alert.gmailQuery} after:${after}`, 10);
     } catch (error) {
@@ -88,7 +96,6 @@ export async function processEmailAlerts(
       try {
         await deliver(alert, message);
         await alerts.markSeen(alert.id, messageId);
-        if (!alert.seenMessageIds.includes(messageId)) alert.seenMessageIds.push(messageId);
       } catch (error) {
         console.error("Email alert delivery failed:", { alertId: alert.id, messageId, message: error instanceof Error ? error.message : String(error) });
       }
@@ -98,22 +105,9 @@ export async function processEmailAlerts(
 
 export function startEmailAlertScheduler(
   alerts: EmailAlertStore,
-  search: (query: string, maxResults: number) => Promise<GmailMessageSummary[]>,
-  deliver: (alert: EmailAlert, message: GmailMessageSummary) => Promise<void>,
+  search: (query: string, maxResults: number) => Promise<AlertEmail[]>,
+  deliver: (alert: EmailAlert, message: AlertEmail) => Promise<void>,
   intervalMs = 60_000,
 ): () => void {
-  let ticking = false;
-  const tick = async () => {
-    if (ticking) return;
-    ticking = true;
-    try {
-      await processEmailAlerts(alerts, search, deliver);
-    } finally {
-      ticking = false;
-    }
-  };
-  void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
-  timer.unref();
-  return () => clearInterval(timer);
+  return startPoller("Email alert scheduler", intervalMs, () => processEmailAlerts(alerts, search, deliver));
 }

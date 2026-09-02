@@ -1,3 +1,5 @@
+import type { GranolaPort } from "./capabilities/granola.js";
+
 const GRANOLA_API_URL = "https://public-api.granola.ai/v1";
 
 async function granolaRequest(path: string, suppliedApiKey?: string): Promise<unknown> {
@@ -17,23 +19,6 @@ async function granolaRequest(path: string, suppliedApiKey?: string): Promise<un
   return response.json();
 }
 
-export async function listGranolaNotes(options: {
-  createdAfter?: string;
-  createdBefore?: string;
-  pageSize?: number;
-}): Promise<unknown> {
-  const params = new URLSearchParams();
-  if (options.createdAfter) params.set("created_after", options.createdAfter);
-  if (options.createdBefore) params.set("created_before", options.createdBefore);
-  params.set("page_size", String(Math.min(Math.max(options.pageSize ?? 10, 1), 30)));
-  return granolaRequest(`/notes?${params}`);
-}
-
-export async function getGranolaNote(noteId: string, includeTranscript = false): Promise<unknown> {
-  if (!/^not_[a-zA-Z0-9]{14}$/.test(noteId)) throw new Error("Invalid Granola note ID.");
-  return granolaRequest(`/notes/${encodeURIComponent(noteId)}${includeTranscript ? "?include=transcript" : ""}`);
-}
-
 export function granolaPort(apiKey?: string): GranolaPort {
   return {
     listNotes: async (options) => {
@@ -49,4 +34,3 @@ export function granolaPort(apiKey?: string): GranolaPort {
     },
   };
 }
-import type { GranolaPort } from "./capabilities/granola.js";

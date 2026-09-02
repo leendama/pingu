@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { startPoller } from "./poller.js";
 import { JsonFileStore } from "./state.js";
 
 export type ReminderRecurrence = "none" | "daily" | "weekly" | "weekdays";
@@ -140,7 +141,6 @@ export function startReminderScheduler(
   deliver: (reminder: Reminder) => Promise<void>,
   intervalMs = 10_000,
 ): () => void {
-  let ticking = false;
   const processDue = async () => {
     const now = Date.now();
     const due = (await store.read())
@@ -182,18 +182,5 @@ export function startReminderScheduler(
       });
     }
   };
-  const tick = async () => {
-    if (ticking) return;
-    ticking = true;
-    try {
-      await processDue();
-    } finally {
-      ticking = false;
-    }
-  };
-
-  void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
-  timer.unref();
-  return () => clearInterval(timer);
+  return startPoller("Reminder scheduler", intervalMs, processDue);
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentInstructions, mayReplayResponseFailure } from "./agent.js";
+import { agentInstructions } from "./agent.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 
 const settings: RuntimeSettings = {
@@ -23,10 +23,5 @@ describe("agent wiring", () => {
     expect(instructions).toContain("do not guess or act");
     expect(instructions).toContain("Never hide or ignore a failed tool call");
     expect(instructions).toContain("set_calendar_event_color");
-  });
-
-  it("replays recoverable failures only before an action starts", () => {
-    expect(mayReplayResponseFailure({ status: 404, incomplete: false, sideEffectAttempted: false })).toBe(true);
-    expect(mayReplayResponseFailure({ status: 404, incomplete: false, sideEffectAttempted: true })).toBe(false);
   });
 });

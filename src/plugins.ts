@@ -98,11 +98,4 @@ export class PluginRegistry {
     }
   }
 
-  isPrivate(name: string): boolean {
-    return this.privateNames.has(name);
-  }
-
-  isSideEffecting(name: string): boolean {
-    return this.sideEffects.has(name);
-  }
 }

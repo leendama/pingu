@@ -1,6 +1,5 @@
 import { imessage } from "@spectrum-ts/imessage";
 import OpenAI from "openai";
-import type { Response, ResponseInput } from "openai/resources/responses/responses";
 import { markdown, Spectrum } from "spectrum-ts";
 import type { Message, Space } from "spectrum-ts";
 import { builtInPlugins } from "./builtin-plugin.js";
@@ -10,17 +9,11 @@ import { createMessageProcessor, inboundMessageText } from "./message-pipeline.j
 import { consumePendingEmailConfirmation, getPendingEmail, markPendingEmailReviewed } from "./pending-emails.js";
 import { emailAlertStore, startEmailAlertScheduler } from "./email-alerts.js";
 import { googleGmailPort } from "./google.js";
-import { PluginRegistry, resetAttemptOutputs, type ToolRunContext } from "./plugins.js";
+import { PluginRegistry } from "./plugins.js";
 import { startReminderScheduler } from "./reminders.js";
+import { createReplyGenerator } from "./reply-generator.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 import { KeyedBatchQueue } from "./task-queue.js";
-
-class IncompleteResponseError extends Error {
-  constructor(readonly reason: string | undefined) {
-    super(`OpenAI returned an incomplete response${reason ? ` (${reason})` : ""}.`);
-    this.name = "IncompleteResponseError";
-  }
-}
 
 export function agentInstructions(settings: RuntimeSettings, pluginInstructions: string[]): string {
   return [
@@ -55,31 +48,13 @@ export interface RunningAgent {
   stop(): Promise<void>;
 }
 
-export function mayReplayResponseFailure(input: {
-  status?: number;
-  incomplete: boolean;
-  sideEffectAttempted: boolean;
-}): boolean {
-  return !input.sideEffectAttempted && (input.status === 400 || input.status === 404 || input.incomplete);
-}
-
 export async function startAgent(settings: RuntimeSettings): Promise<RunningAgent> {
   const openai = new OpenAI({ apiKey: settings.openaiApiKey });
   const registry = new PluginRegistry([...builtInPlugins(settings), ...await loadCommunityPlugins()]);
   const instructions = agentInstructions(settings, registry.instructions);
 
-  async function createConversation(spaceId: string): Promise<string> {
-    const conversation = await openai.conversations.create({ metadata: { spectrum_space_id: spaceId } });
-    await setConversationId(spaceId, conversation.id);
-    return conversation.id;
-  }
-
-  async function runResponse(
-    conversationId: string,
-    input: ResponseInput | string,
-    context: ToolRunContext,
-  ): Promise<Response> {
-    let response = await openai.responses.create({
+  const generateReply = createReplyGenerator({
+    respond: (conversationId, input) => openai.responses.create({
       model: settings.model,
       conversation: conversationId,
       instructions,
@@ -87,55 +62,15 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       tools: registry.tools,
       reasoning: { effort: "low" },
       text: { verbosity: "low" },
-    });
-    for (let round = 0; round < 6; round += 1) {
-      const calls = response.output.filter((item) => item.type === "function_call");
-      if (calls.length === 0) return response;
-      const outputs: ResponseInput = [];
-      for (const call of calls) {
-        const result = await registry.run(call.name, call.arguments, context);
-        outputs.push({
-          type: "function_call_output",
-          call_id: call.call_id,
-          output: result.handled ? result.output : JSON.stringify({ error: `Unknown tool: ${call.name}` }),
-        });
-      }
-      response = await openai.responses.create({
-        model: settings.model,
-        conversation: conversationId,
-        instructions,
-        input: outputs,
-        tools: registry.tools,
-        reasoning: { effort: "low" },
-        text: { verbosity: "low" },
-      });
-    }
-    throw new Error("The agent exceeded the tool-call limit.");
-  }
-
-  async function generateReply(spaceId: string, inboundText: string, context: ToolRunContext): Promise<string> {
-    let conversationId = await getConversationId(spaceId) ?? await createConversation(spaceId);
-    try {
-      const response = await runResponse(conversationId, inboundText, context);
-      if (response.output_text) return response.output_text;
-      if (response.status === "incomplete") throw new IncompleteResponseError(response.incomplete_details?.reason);
-      throw new Error(`OpenAI returned no reply (status: ${response.status}).`);
-    } catch (error) {
-      const status = error instanceof OpenAI.APIError ? error.status : undefined;
-      if (!mayReplayResponseFailure({
-        status,
-        incomplete: error instanceof IncompleteResponseError,
-        sideEffectAttempted: context.sideEffectAttempted,
-      })) throw error;
-      resetAttemptOutputs(context);
-      await clearConversationId(spaceId);
-      conversationId = await createConversation(spaceId);
-      const response = await runResponse(conversationId, inboundText, context);
-      if (response.output_text) return response.output_text;
-      if (response.status === "incomplete") throw new IncompleteResponseError(response.incomplete_details?.reason);
-      throw new Error(`OpenAI returned no reply after resetting conversation (status: ${response.status}).`);
-    }
-  }
+    }),
+    createConversation: async (spaceId) => {
+      const conversation = await openai.conversations.create({ metadata: { spectrum_space_id: spaceId } });
+      await setConversationId(spaceId, conversation.id);
+      return conversation.id;
+    },
+    conversations: { get: getConversationId, clear: clearConversationId },
+    runTool: (name, argumentsJson, context) => registry.run(name, argumentsJson, context),
+  });
 
   const app = await Spectrum({
     projectId: settings.photonProjectId,

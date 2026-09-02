@@ -56,7 +56,19 @@ export async function googleClient(credentials?: RuntimeSettings["google"]) {
 }
 
 export function googleCalendarPort(credentials?: RuntimeSettings["google"]): CalendarPort {
+  let cachedTimezone: Promise<string | undefined> | undefined;
   return {
+    getTimezone() {
+      cachedTimezone ??= (async () => {
+        const { calendar } = await googleClient(credentials);
+        return (await calendar.calendars.get({ calendarId: "primary" })).data.timeZone ?? undefined;
+      })().catch((error) => {
+        console.warn("Calendar timezone lookup failed:", error instanceof Error ? error.message : String(error));
+        cachedTimezone = undefined;
+        return undefined;
+      });
+      return cachedTimezone;
+    },
     async listEvents(params) {
       const { calendar } = await googleClient(credentials);
       const events = [];

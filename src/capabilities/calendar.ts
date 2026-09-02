@@ -16,11 +16,27 @@ export interface CalendarEventData {
 }
 
 export interface CalendarPort {
+  /** The calendar's own IANA timezone — the zone Google uses for all-day event boundaries. */
+  getTimezone(): Promise<string | undefined>;
   listEvents(params: { timeMin?: string; timeMax?: string; query?: string }): Promise<CalendarEventData[]>;
   getEvent(eventId: string): Promise<CalendarEventData | undefined>;
   insertEvent(requestBody: JsonObject, sendUpdates: "all" | "none"): Promise<CalendarEventData>;
   patchEvent(eventId: string, requestBody: JsonObject, sendUpdates: "all" | "none"): Promise<CalendarEventData>;
   deleteEvent(eventId: string, sendUpdates: "all" | "none"): Promise<void>;
+}
+
+/**
+ * Naive date-times resolve in the request timezone (that zone is also what we
+ * send to Google); bare all-day dates resolve in the calendar's timezone,
+ * because that is the zone Google gives their boundaries.
+ */
+interface CalendarZones {
+  timezone: string;
+  allDayTimezone: string;
+}
+
+async function calendarZones(port: CalendarPort, timezone: string): Promise<CalendarZones> {
+  return { timezone, allDayTimezone: await port.getTimezone() ?? timezone };
 }
 
 interface CalendarTime {
@@ -86,22 +102,25 @@ function calendarDateTime(value: string, timezone: string): { date?: string; dat
   return { dateTime: value, timeZone: timezone };
 }
 
-function eventWindow(start: string, end: string, timezone: string) {
-  const startValue = calendarDateTime(start, timezone);
-  const endValue = calendarDateTime(end, timezone);
+function eventWindow(start: string, end: string, zones: CalendarZones) {
+  const startValue = calendarDateTime(start, zones.timezone);
+  const endValue = calendarDateTime(end, zones.timezone);
   if (Boolean(startValue.date) !== Boolean(endValue.date)) {
     throw new Error("Calendar start and end must both be all-day dates or both be date-times.");
   }
-  const startMs = calendarTimestamp(start, timezone);
-  const endMs = calendarTimestamp(end, timezone);
+  const startMs = calendarTimestamp(start, zones);
+  const endMs = calendarTimestamp(end, zones);
   if (endMs <= startMs) throw new Error("Calendar end must be after start.");
   return { startValue, endValue, startMs, endMs };
 }
 
-function calendarTimestamp(value: string, timezone: string): number {
-  // An all-day date is midnight in the event's timezone, not UTC — otherwise
-  // conflict arithmetic shifts by the UTC offset and misses real overlaps.
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return calendarTimestamp(`${value}T00:00:00`, timezone);
+function calendarTimestamp(value: string, zones: CalendarZones): number {
+  // An all-day date is midnight in the calendar's timezone, not UTC and not
+  // the request timezone — that is the zone Google gives all-day boundaries.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return calendarTimestamp(`${value}T00:00:00`, { timezone: zones.allDayTimezone, allDayTimezone: zones.allDayTimezone });
+  }
+  const timezone = zones.timezone;
   if (/Z$|[+-]\d{2}:?\d{2}$/.test(value)) return Date.parse(value);
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/);
   if (!match) return Date.parse(value);
@@ -125,15 +144,15 @@ function eventTime(value: unknown): CalendarTime | undefined {
   return value as CalendarTime;
 }
 
-function eventBounds(event: CalendarEventData, fallbackTimezone: string) {
+function eventBounds(event: CalendarEventData, zones: CalendarZones) {
   const start = eventTime(event.start);
   const end = eventTime(event.end);
   const startText = start?.dateTime ?? start?.date;
   const endText = end?.dateTime ?? end?.date;
   if (!startText || !endText) return undefined;
   return {
-    startMs: calendarTimestamp(startText, start?.timeZone ?? fallbackTimezone),
-    endMs: calendarTimestamp(endText, end?.timeZone ?? fallbackTimezone),
+    startMs: calendarTimestamp(startText, { ...zones, timezone: start?.timeZone ?? zones.timezone }),
+    endMs: calendarTimestamp(endText, { ...zones, timezone: end?.timeZone ?? zones.timezone }),
   };
 }
 
@@ -162,23 +181,24 @@ function compareSequencePosition(left: number[], right: number[]) {
   return 0;
 }
 
-function sameCalendarTime(actual: unknown, expected: CalendarTime, timezone: string) {
+function sameCalendarTime(actual: unknown, expected: CalendarTime, zones: CalendarZones) {
   const value = eventTime(actual);
   const actualText = value?.dateTime ?? value?.date;
   const expectedText = expected.dateTime ?? expected.date;
   return Boolean(actualText && expectedText)
-    && calendarTimestamp(actualText!, value?.timeZone ?? timezone) === calendarTimestamp(expectedText!, expected.timeZone ?? timezone);
+    && calendarTimestamp(actualText!, { ...zones, timezone: value?.timeZone ?? zones.timezone })
+      === calendarTimestamp(expectedText!, { ...zones, timezone: expected.timeZone ?? zones.timezone });
 }
 
-async function prepareMoves(port: CalendarPort, moves: RescheduleMove[], timezone: string): Promise<PreparedMove[]> {
+async function prepareMoves(port: CalendarPort, moves: RescheduleMove[], zones: CalendarZones): Promise<PreparedMove[]> {
   if (moves.length === 0) throw new Error("At least one calendar move is required.");
   if (new Set(moves.map((move) => move.eventId)).size !== moves.length) throw new Error("Each event can appear only once in a bulk move.");
   return Promise.all(moves.map(async (move) => {
     const original = await port.getEvent(move.eventId);
     if (!original) throw new Error(`Calendar event ${move.eventId} was not found.`);
-    const originalBounds = eventBounds(original, timezone);
+    const originalBounds = eventBounds(original, zones);
     if (!originalBounds) throw new Error(`Calendar event ${move.eventId} has no usable start or end.`);
-    const target = eventWindow(move.newStart, move.newEnd, timezone);
+    const target = eventWindow(move.newStart, move.newEnd, zones);
     if (target.endMs - target.startMs !== originalBounds.endMs - originalBounds.startMs) {
       throw new Error(`Move for ${move.eventId} changes its duration. Keep the original duration.`);
     }
@@ -191,14 +211,14 @@ async function busyConflict<TWindow extends { startMs: number; endMs: number }>(
   port: CalendarPort,
   windows: TWindow[],
   ignoredIds: Set<string>,
-  timezone: string,
+  zones: CalendarZones,
 ): Promise<{ window: TWindow; event: CalendarEventData } | undefined> {
   const minStart = Math.min(...windows.map((window) => window.startMs));
   const maxEnd = Math.max(...windows.map((window) => window.endMs));
   const existing = await port.listEvents({ timeMin: new Date(minStart).toISOString(), timeMax: new Date(maxEnd).toISOString() });
   for (const event of existing) {
     if (!event.id || ignoredIds.has(event.id) || event.status === "cancelled" || event.transparency === "transparent") continue;
-    const bounds = eventBounds(event, timezone);
+    const bounds = eventBounds(event, zones);
     const window = bounds && windows.find((candidate) => overlaps(candidate, bounds));
     if (window) return { window, event };
   }
@@ -209,7 +229,7 @@ async function validateMovePlan(
   port: CalendarPort,
   prepared: PreparedMove[],
   duplicateIds: Set<string>,
-  timezone: string,
+  zones: CalendarZones,
 ) {
   for (let left = 0; left < prepared.length; left += 1) {
     for (let right = left + 1; right < prepared.length; right += 1) {
@@ -222,7 +242,7 @@ async function validateMovePlan(
   }
 
   const ignoredIds = new Set([...prepared.map((move) => move.eventId), ...duplicateIds]);
-  const conflict = await busyConflict(port, prepared, ignoredIds, timezone);
+  const conflict = await busyConflict(port, prepared, ignoredIds, zones);
   if (conflict) throw new Error(`Move for ${conflict.window.eventId} conflicts with existing event ${conflict.event.id}. Choose a free time.`);
 
   const groups = new Map<string, PreparedMove[]>();
@@ -241,7 +261,7 @@ async function validateMovePlan(
       .filter((event) => event.id && !duplicateIds.has(event.id))
       .map((event) => {
         const planned = plannedById.get(event.id!);
-        const bounds = planned ?? eventBounds(event, timezone);
+        const bounds = planned ?? eventBounds(event, zones);
         return { id: event.id!, position: sequencePosition(event.summary), startMs: bounds?.startMs };
       })
       .filter((item): item is { id: string; position: number[]; startMs: number } => item.position !== undefined && item.startMs !== undefined)
@@ -256,7 +276,7 @@ async function validateMovePlan(
   }
 }
 
-async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], duplicateIds: string[], timezone: string) {
+async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], duplicateIds: string[], zones: CalendarZones) {
   const applied: PreparedMove[] = [];
   try {
     for (const move of prepared) {
@@ -265,7 +285,7 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
     }
     for (const move of prepared) {
       const verified = await port.getEvent(move.eventId);
-      if (!verified || !sameCalendarTime(verified.start, move.startValue, timezone) || !sameCalendarTime(verified.end, move.endValue, timezone)) {
+      if (!verified || !sameCalendarTime(verified.start, move.startValue, zones) || !sameCalendarTime(verified.end, move.endValue, zones)) {
         throw new Error(`Calendar did not verify move ${move.eventId}.`);
       }
     }
@@ -404,9 +424,10 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           const timezone = stringValue(args.timezone) ?? context.config.timezone;
           if (!eventId || !newStart || !newEnd) throw new Error("Event ID, new start, and new end are required.");
 
-          const prepared = await prepareMoves(port, [{ eventId, newStart, newEnd }], timezone);
-          await validateMovePlan(port, prepared, new Set(), timezone);
-          await applyMovePlan(port, prepared, [], timezone);
+          const zones = await calendarZones(port, timezone);
+          const prepared = await prepareMoves(port, [{ eventId, newStart, newEnd }], zones);
+          await validateMovePlan(port, prepared, new Set(), zones);
+          await applyMovePlan(port, prepared, [], zones);
           const event = await port.getEvent(eventId);
           if (!event) throw new Error(`Calendar could not verify moved event ${eventId}.`);
           return {
@@ -476,12 +497,13 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           const movedIds = new Set(moves.map((move) => move.eventId));
           if (duplicateIds.some((eventId) => movedIds.has(eventId))) throw new Error("An event cannot be both moved and deleted as a duplicate.");
           const timezone = stringValue(args.timezone) ?? context.config.timezone;
-          const prepared = await prepareMoves(port, moves, timezone);
+          const zones = await calendarZones(port, timezone);
+          const prepared = await prepareMoves(port, moves, zones);
           for (const eventId of duplicateIds) {
             if (!await port.getEvent(eventId)) throw new Error(`Duplicate calendar event ${eventId} was not found. Nothing was changed.`);
           }
-          await validateMovePlan(port, prepared, new Set(duplicateIds), timezone);
-          const result = await applyMovePlan(port, prepared, duplicateIds, timezone);
+          await validateMovePlan(port, prepared, new Set(duplicateIds), zones);
+          const result = await applyMovePlan(port, prepared, duplicateIds, zones);
           return { output: JSON.stringify({ completed: true, moved_count: result.moved, deleted_duplicate_count: result.deletedDuplicates }) };
         },
       },
@@ -513,10 +535,11 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           const timezone = stringValue(args.timezone) ?? context.config.timezone;
           if (!title || !start || !end) throw new Error("Event title, start, and end are required.");
 
-          const { startValue, endValue, startMs, endMs } = eventWindow(start, end, timezone);
+          const zones = await calendarZones(port, timezone);
+          const { startValue, endValue, startMs, endMs } = eventWindow(start, end, zones);
           // Timed events must land on free time; all-day events coexist with the day's schedule.
           if (!startValue.date) {
-            const conflict = await busyConflict(port, [{ startMs, endMs }], new Set(), timezone);
+            const conflict = await busyConflict(port, [{ startMs, endMs }], new Set(), zones);
             if (conflict) throw new Error(`That time conflicts with existing event ${conflict.event.id}${conflict.event.summary ? ` (${conflict.event.summary})` : ""}. Choose a free time.`);
           }
           const attendees = stringArray(args.attendees).map((email) => ({ email: cleanHeader(email) }));
@@ -585,9 +608,10 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           const requestBody: JsonObject = {};
           if (typeof args.title === "string") requestBody.summary = args.title;
           if (newStart && newEnd) {
-            const { startValue, endValue, startMs, endMs } = eventWindow(newStart, newEnd, timezone);
+            const zones = await calendarZones(port, timezone);
+            const { startValue, endValue, startMs, endMs } = eventWindow(newStart, newEnd, zones);
             if (!startValue.date) {
-              const conflict = await busyConflict(port, [{ startMs, endMs }], new Set([eventId]), timezone);
+              const conflict = await busyConflict(port, [{ startMs, endMs }], new Set([eventId]), zones);
               if (conflict) throw new Error(`That time conflicts with existing event ${conflict.event.id}${conflict.event.summary ? ` (${conflict.event.summary})` : ""}. Choose a free time.`);
             }
             requestBody.start = startValue;

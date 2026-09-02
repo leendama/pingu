@@ -9,9 +9,12 @@ interface RecordedCall {
   sendUpdates?: "all" | "none";
 }
 
-function fakePort(calls: RecordedCall[], initial: CalendarEventData[] = []): CalendarPort {
+function fakePort(calls: RecordedCall[], initial: CalendarEventData[] = [], calendarTimezone?: string): CalendarPort {
   const events = new Map(initial.map((event) => [event.id!, structuredClone(event)]));
   return {
+    async getTimezone() {
+      return calendarTimezone;
+    },
     async listEvents() {
       calls.push({ method: "list" });
       return [...events.values()];
@@ -236,6 +239,22 @@ describe("calendarPlugin", () => {
       event_id: "move", new_start: "2026-09-02T09:00:00+10:00", new_end: "2026-09-02T10:00:00+10:00", timezone: "Australia/Sydney",
     }), context);
     expect(JSON.parse(outside.output).moved).toBe(true);
+  });
+
+  it("resolves all-day boundaries in the calendar's timezone, not the request timezone", async () => {
+    const allDay = { id: "allday", summary: "Conference", start: { date: "2026-09-01" }, end: { date: "2026-09-02" } };
+    const mover = { id: "move", summary: "Focus", start: { dateTime: "2026-09-05T09:00:00Z" }, end: { dateTime: "2026-09-05T10:00:00Z" } };
+
+    // Sydney all-day window: Aug 31 14:00Z → Sep 1 14:00Z. Request timezone is UTC.
+    const insideCalendarZone = await calendarPlugin(fakePort([], [allDay, mover], "Australia/Sydney")).run("reschedule_calendar_event", JSON.stringify({
+      event_id: "move", new_start: "2026-08-31T20:00:00Z", new_end: "2026-08-31T21:00:00Z", timezone: "UTC",
+    }), context);
+    expect(JSON.parse(insideCalendarZone.output).error).toMatch(/conflicts with existing event allday/);
+
+    const outsideCalendarZone = await calendarPlugin(fakePort([], [structuredClone(allDay), structuredClone(mover)], "Australia/Sydney")).run("reschedule_calendar_event", JSON.stringify({
+      event_id: "move", new_start: "2026-09-01T20:00:00Z", new_end: "2026-09-01T21:00:00Z", timezone: "UTC",
+    }), context);
+    expect(JSON.parse(outsideCalendarZone.output).moved).toBe(true);
   });
 
   it("refuses to create a timed event over a busy time", async () => {

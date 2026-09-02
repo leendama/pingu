@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { builtInPlugins } from "./builtin-plugin.js";
 import { PluginRegistry, type ToolRunContext } from "./plugins.js";
 
-function context(isGroup: boolean): ToolRunContext {
-  return { isGroup, config: { timezone: "UTC" }, sideEffectAttempted: false } as ToolRunContext;
+function context(isGroup: boolean, role: "owner" | "guest" = "owner"): ToolRunContext {
+  return { isGroup, role, spaceId: "chat", config: { timezone: "UTC" }, sideEffectAttempted: false, untrustedContentSeen: false } as ToolRunContext;
 }
 
 describe("built-in plugin policy", () => {
@@ -30,5 +30,27 @@ describe("built-in plugin policy", () => {
     const turn = context(false);
     await registry.run("get_current_time", JSON.stringify({ timezone: "UTC" }), turn);
     expect(turn.sideEffectAttempted).toBe(false);
+  });
+
+  it("offers guests only chat, reminders, message features, and nothing private", () => {
+    const names = registry.toolsFor(context(false, "guest")).map((tool) => tool.type === "function" ? tool.name : "");
+    expect(names).toContain("create_reminder");
+    expect(names).toContain("react_to_message");
+    expect(names).not.toContain("search_gmail");
+    expect(names).not.toContain("search_calendar");
+    expect(names).not.toContain("list_granola_notes");
+    expect(names).not.toContain("get_group_members");
+  });
+
+  it("drops the voice tool when the provider cannot synthesise speech", () => {
+    const silent = new PluginRegistry(builtInPlugins(undefined, { voice: false }));
+    expect(silent.tools.some((tool) => tool.type === "function" && tool.name === "send_voice_reply")).toBe(false);
+    expect(registry.tools.some((tool) => tool.type === "function" && tool.name === "send_voice_reply")).toBe(true);
+  });
+
+  it("marks Gmail and Granola reads as third-party content", async () => {
+    const turn = context(false);
+    await registry.run("read_gmail_message", JSON.stringify({ message_id: "m1" }), turn);
+    expect(turn.untrustedContentSeen).toBe(true);
   });
 });

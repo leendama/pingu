@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
+import { parseBookableDays, parseBookableHours } from "./scheduling-settings.js";
 import { atomicWriteText, dataPath, withFileLock } from "./state.js";
 
 const timezone = z.string().refine((value) => {
@@ -12,20 +13,57 @@ const timezone = z.string().refine((value) => {
   }
 }, "Enter a valid IANA timezone, such as UTC.");
 
+const optionalUrl = z.string().trim().optional().refine((value) => {
+  if (!value) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}, "Enter a full http(s) URL for the model endpoint, or leave it blank for OpenAI.");
+
+const bookableHours = z.string().trim().default("09:00-17:00").refine((value) => {
+  try {
+    parseBookableHours(value);
+    return true;
+  } catch {
+    return false;
+  }
+}, "Bookable hours must look like 09:00-17:00 or 24h.");
+
+const bookableDays = z.string().trim().default("weekdays").refine((value) => {
+  try {
+    parseBookableDays(value);
+    return true;
+  } catch {
+    return false;
+  }
+}, "Bookable days must be weekdays, all, or day numbers 0-6.");
+
 export const assistantConfigSchema = z.object({
   assistantName: z.string().trim().min(1).max(40).default("Pingu"),
   ownerName: z.string().trim().min(1).max(80),
   timezone,
   photonProjectId: z.string().trim().min(1),
   photonProjectSecret: z.string().trim().min(1),
-  openaiApiKey: z.string().trim().min(20),
+  /** Any non-empty value; local endpoints often ignore it. */
+  openaiApiKey: z.string().trim().min(1),
   model: z.string().trim().min(1).default("gpt-5.6-luna"),
+  openaiBaseUrl: optionalUrl,
   granolaApiKey: z.string().trim().optional(),
   google: z.object({
     clientId: z.string().trim().min(8),
     clientSecret: z.string().trim().min(4),
     refreshToken: z.string().optional(),
   }),
+  telemetry: z.boolean().default(false),
+  guestDailyMessageCap: z.coerce.number().int().min(1).max(500).default(20),
+  transcriptRetentionDays: z.coerce.number().int().min(0).max(3650).default(30),
+  bookableHours,
+  bookableDays,
+  defaultMeetingMinutes: z.coerce.number().int().min(5).max(480).default(30),
+  meetLink: z.boolean().default(true),
 });
 
 export type AssistantConfig = z.infer<typeof assistantConfigSchema>;

@@ -28,6 +28,7 @@ export function granolaPlugin(port: GranolaPort): PinguPlugin {
           },
         },
         sideEffecting: false,
+        untrustedSource: true,
         run: async (args) => ({
           output: JSON.stringify(await port.listNotes({
             createdAfter: stringValue(args.created_after),
@@ -53,6 +54,7 @@ export function granolaPlugin(port: GranolaPort): PinguPlugin {
           },
         },
         sideEffecting: false,
+        untrustedSource: true,
         run: async (args) => ({
           output: JSON.stringify(await port.getNote(
             stringValue(args.note_id) ?? "",

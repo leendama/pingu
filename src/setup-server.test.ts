@@ -20,7 +20,7 @@ vi.mock("./google.js", () => ({
 
 vi.mock("./diagnostics.js", () => ({
   runDiagnostics: async () => [
-    { name: "openai", label: "OpenAI", status: "ok", detail: "The key can use gpt-5.6-luna." },
+    { name: "provider", label: "OpenAI", status: "ok", detail: "The key can use gpt-5.6-luna." },
     { name: "google", label: "Google Calendar and Gmail", status: "failed", detail: "Gmail permission is missing. Reconnect Google and approve every permission." },
   ],
 }));
@@ -30,7 +30,7 @@ const servers: Server[] = [];
 
 afterEach(async () => {
   resetRuntimeStatus();
-  for (const name of ["PHOTON_DATA_DIR", "PHOTON_CONFIG_KEY", "PHOTON_SETUP_TOKEN", "PHOTON_PUBLIC_URL"]) delete process.env[name];
+  for (const name of ["PHOTON_DATA_DIR", "PHOTON_CONFIG_KEY", "PHOTON_SETUP_TOKEN", "PHOTON_PUBLIC_URL", "PINGU_OWNER_SENDER_IDS"]) delete process.env[name];
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
@@ -229,5 +229,68 @@ describe("google oauth callback", () => {
 
     const setupPage = await fetch(`${base}${callback.headers.get("location")}`, { headers: { cookie: await loginCookie(base) } });
     expect(await setupPage.text()).toContain("Google connected, but the assistant could not start: Photon authentication failed");
+  });
+});
+
+describe("owner claim codes", () => {
+  it("shows a claim code behind the login and lists verified owners", async () => {
+    const { base } = await startServer();
+    const cookie = await loginCookie(base);
+    const before = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(before).toContain("No verified owner yet");
+    const claimed = await (await fetch(`${base}/setup/claim`, { method: "POST", headers: { cookie } })).text();
+    const code = claimed.match(/PINGU-[A-Z0-9]{6}/)?.[0];
+    expect(code).toBeDefined();
+    const { redeemClaimCode } = await import("./owners.js");
+    expect(await redeemClaimCode(code!, { senderId: "+15550101000", spaceId: "dm" })).toBe("verified");
+    const after = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(after).toContain("+15550101000");
+    const removed = await (await fetch(`${base}/setup/owners/remove`, { method: "POST", headers: { cookie }, body: new URLSearchParams({ senderId: "+15550101000" }) })).text();
+    expect(removed).toContain("Owner removed");
+  });
+
+  it("requires authentication to issue a code", async () => {
+    const { base } = await startServer();
+    expect((await fetch(`${base}/setup/claim`, { method: "POST" })).status).toBe(401);
+  });
+});
+
+describe("delete all data", () => {
+  it("refuses without the typed confirmation and deletes with it", async () => {
+    const { base, directory } = await startServer();
+    const cookie = await loginCookie(base);
+    await writeFile(join(directory, "reminders.json"), "[]", "utf8");
+    const refused = await fetch(`${base}/setup/data/delete`, { method: "POST", headers: { cookie }, body: new URLSearchParams({ confirm: "delete" }) });
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain("Nothing was deleted");
+    const deleted = await (await fetch(`${base}/setup/data/delete`, { method: "POST", headers: { cookie }, body: new URLSearchParams({ confirm: "DELETE" }) })).text();
+    expect(deleted).toContain("1 data file(s)");
+  });
+});
+
+describe("saved settings", () => {
+  it("stores endpoint, guest, booking, and privacy settings with checkbox semantics", async () => {
+    const { base } = await startServer(async () => ({ started: false, reason: "already-running" }));
+    await saveConfig(savedConfig);
+    const { loadConfig } = await import("./config.js");
+    await fetch(`${base}/setup/save`, {
+      method: "POST",
+      headers: { cookie: await loginCookie(base) },
+      body: saveBody({ openaiBaseUrl: "http://host.docker.internal:11434/v1", bookableHours: "24h", bookableDays: "all", guestDailyMessageCap: "5", transcriptRetentionDays: "0", defaultMeetingMinutes: "45", telemetry: "on" }),
+    });
+    const config = await loadConfig();
+    expect(config).toMatchObject({ openaiBaseUrl: "http://host.docker.internal:11434/v1", bookableHours: "24h", bookableDays: "all", guestDailyMessageCap: 5, transcriptRetentionDays: 0, defaultMeetingMinutes: 45, telemetry: true, meetLink: false });
+  });
+
+  it("rejects an endpoint that is not a URL", async () => {
+    const { base } = await startServer();
+    await saveConfig(savedConfig);
+    const response = await fetch(`${base}/setup/save`, {
+      method: "POST",
+      headers: { cookie: await loginCookie(base) },
+      body: saveBody({ openaiBaseUrl: "ollama" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("full http(s) URL");
   });
 });

@@ -176,6 +176,7 @@ export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): 
           },
         },
         sideEffecting: false,
+        untrustedSource: true,
         run: async (args) => {
           const messages = await port.searchMessages(
             stringValue(args.query),
@@ -200,6 +201,7 @@ export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): 
           },
         },
         sideEffecting: false,
+        untrustedSource: true,
         run: async (args) => {
           const messageId = stringValue(args.message_id);
           if (!messageId) throw new Error("A Gmail message ID is required.");

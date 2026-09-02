@@ -116,9 +116,14 @@ export function googleCalendarPort(credentials?: RuntimeSettings["google"]): Cal
         throw error;
       }
     },
-    async insertEvent(requestBody: JsonObject, sendUpdates) {
+    async insertEvent(requestBody: JsonObject, sendUpdates, options) {
       const { calendar } = await googleClient(credentials);
-      return (await calendar.events.insert({ calendarId: "primary", sendUpdates, requestBody })).data;
+      return (await calendar.events.insert({
+        calendarId: "primary",
+        sendUpdates,
+        requestBody,
+        ...(options?.conferenceDataVersion ? { conferenceDataVersion: options.conferenceDataVersion } : {}),
+      })).data;
     },
     async patchEvent(eventId: string, requestBody: JsonObject, sendUpdates) {
       const { calendar } = await googleClient(credentials);

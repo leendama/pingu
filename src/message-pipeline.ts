@@ -1,6 +1,8 @@
 import { markdown, voice } from "spectrum-ts";
 import type { Content, Message, Space } from "spectrum-ts";
-import type { ToolRunContext } from "./plugins.js";
+import { guestLimitMessage, type GuestAdmission } from "./guests.js";
+import type { ClaimOutcome } from "./owners.js";
+import type { SenderRole, ToolRunContext } from "./plugins.js";
 import type { PendingEmail } from "./pending-emails.js";
 
 interface ConfirmationResult {
@@ -9,6 +11,7 @@ interface ConfirmationResult {
 
 export interface MessagePipelineDependencies {
   assistantName: string;
+  ownerName: string;
   timezone: string;
   progressDelayMs?: number;
   generateReply: (spaceId: string, inboundText: string, context: ToolRunContext) => Promise<string>;
@@ -16,6 +19,18 @@ export interface MessagePipelineDependencies {
   consumeEmailConfirmation: (spaceId: string, texts: readonly string[]) => Promise<ConfirmationResult>;
   getPendingEmail: (spaceId: string) => Promise<PendingEmail | undefined>;
   markEmailReviewed: (spaceId: string, draftId: string) => Promise<void>;
+  /** Consume an armed destructive action (delete confirmations). */
+  consumeActionConfirmation?: (spaceId: string, texts: readonly string[]) => Promise<{ confirmedActionKey?: string }>;
+  /** Who the sender is. A missing sender id must resolve to "guest". */
+  resolveRole: (senderId: string | undefined) => Promise<SenderRole>;
+  /** Redeem an owner claim code texted to Pingu; undefined when the text is not a code. */
+  redeemClaim?: (text: string, sender: { senderId: string; spaceId: string }) => Promise<ClaimOutcome | undefined>;
+  /** Count a guest message against the caps and report first contact. */
+  admitGuest?: (senderId: string) => Promise<GuestAdmission>;
+  /** Text an unknown sender sees before their first reply. */
+  guestDisclosure?: string;
+  /** Let a verified owner resolve a scheduling request by replying; returns the reply to send when handled. */
+  resolveOwnerReply?: (input: { message: Message; texts: readonly string[]; spaceId: string; senderId: string }) => Promise<string | undefined>;
   /** Called once per turn after a reply (text or rich response) reaches the user. */
   onReplyDelivered?: () => void;
 }
@@ -38,6 +53,12 @@ export function formatEmailDraft(email: PendingEmail): string {
 export function spaceKind(space: Space): "dm" | "group" | "unknown" {
   const kind = (space as unknown as { type?: unknown }).type;
   return kind === "dm" || kind === "group" ? kind : "unknown";
+}
+
+/** Spectrum's sender id, or undefined when the platform recorded no actor. Never derived from the space id. */
+export function inboundSenderId(message: Message): string | undefined {
+  const sender = (message as unknown as { sender?: { id?: unknown } }).sender;
+  return typeof sender?.id === "string" && sender.id.length > 0 ? sender.id : undefined;
 }
 
 function describeContent(content: Content, depth = 0): string | undefined {
@@ -63,11 +84,17 @@ export function inboundMessageText(message: Message): string | undefined {
     : `The user sent a threaded reply:\n${replyText}`;
 }
 
-function directInboundText(message: Message): string | undefined {
+export function directInboundText(message: Message): string | undefined {
   if (message.direction !== "inbound") return undefined;
   if (message.content.type === "text") return message.content.text;
   if (message.content.type === "reply") return describeContent(message.content.content);
   return undefined;
+}
+
+/** The text of the message a threaded reply points at, when there is one. */
+export function replyTargetText(message: Message): string | undefined {
+  if (message.direction !== "inbound" || message.content.type !== "reply") return undefined;
+  return describeContent(message.content.target.content);
 }
 
 export function combineInboundMessages(messages: readonly Message[]): string {
@@ -80,53 +107,96 @@ export function combineInboundMessages(messages: readonly Message[]): string {
   ].join("\n");
 }
 
+function claimOutcomeText(outcome: ClaimOutcome, assistantName: string): string {
+  if (outcome === "verified") return `Verified. This number is now ${assistantName}'s owner. Private tools work in this chat.`;
+  if (outcome === "expired") return "That claim code has expired. Generate a new one in the setup page and text it within an hour.";
+  return "That claim code doesn't match the active one. Generate a fresh code in the setup page and text it here.";
+}
+
 export function createMessageProcessor(dependencies: MessagePipelineDependencies) {
+  async function sendNotice(space: Space, message: Message, isGroup: boolean, text: string, label: string): Promise<void> {
+    try {
+      if (isGroup) await message.reply(markdown(text));
+      else await space.send(markdown(text));
+    } catch (error) {
+      console.error(`Unable to deliver the ${label} notice:`, {
+        name: error instanceof Error ? error.name : "UnknownError",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   return async function processMessage(space: Space, input: Message | readonly Message[]): Promise<void> {
     const messages = Array.isArray(input) ? input : [input];
     if (messages.length === 0) return;
     const message = messages.at(-1)!;
+    const kind = spaceKind(space);
+    // Unknown conversation types fail closed (group-level privacy) — and visibly, not silently.
+    const isGroup = kind !== "dm";
     if (messages.some((item) => !inboundMessageText(item))) {
-      const failure = "I couldn't read that message. Send it as text and I'll handle it.";
-      try {
-        if (spaceKind(space) === "group") await message.reply(markdown(failure));
-        else await space.send(markdown(failure));
-      } catch (error) {
-        console.error("Unable to deliver the unreadable-message notice:", {
-          name: error instanceof Error ? error.name : "UnknownError",
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
+      await sendNotice(space, message, kind === "group", "I couldn't read that message. Send it as text and I'll handle it.", "unreadable-message");
       return;
     }
 
     const inboundText = combineInboundMessages(messages);
-    const kind = spaceKind(space);
-    // Unknown conversation types fail closed (group-level privacy) — and visibly, not silently.
-    const isGroup = kind !== "dm";
-    if (kind === "unknown") {
-      console.warn("Spectrum returned an unknown conversation type. Treating it as a group chat for this message.", { spaceId: space.id });
-      try {
-        await space.send(markdown("I can't tell whether this is a group chat, so private tools are disabled for this message."));
-      } catch (error) {
-        console.error("Unable to deliver the unknown-conversation notice:", {
-          name: error instanceof Error ? error.name : "UnknownError",
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
+    const senderId = inboundSenderId(message);
     // Each message is matched individually — a burst combining "send it" with a
     // follow-up must not hide the confirmation inside the combined prose.
-    const confirmationTexts = messages.map((item) => directInboundText(item)).filter((item): item is string => Boolean(item));
-    const confirmation = await dependencies.consumeEmailConfirmation(space.id, confirmationTexts);
+    const directTexts = messages.map((item) => directInboundText(item)).filter((item): item is string => Boolean(item));
+
+    if (dependencies.redeemClaim && senderId && !isGroup) {
+      for (const text of directTexts) {
+        const outcome = await dependencies.redeemClaim(text, { senderId, spaceId: space.id });
+        if (!outcome) continue;
+        await sendNotice(space, message, false, claimOutcomeText(outcome, dependencies.assistantName), "claim-code");
+        dependencies.onReplyDelivered?.();
+        return;
+      }
+    }
+
+    const role = await dependencies.resolveRole(senderId);
+    if (kind === "unknown") {
+      console.warn("Spectrum returned an unknown conversation type. Treating it as a group chat for this message.", { spaceId: space.id });
+      await sendNotice(space, message, false, "I can't tell whether this is a group chat, so private tools are disabled for this message.", "unknown-conversation");
+    }
+
+    if (role === "guest" && dependencies.admitGuest) {
+      const admission = await dependencies.admitGuest(senderId ?? `space:${space.id}`);
+      if (!admission.allowed) {
+        await sendNotice(space, message, isGroup, guestLimitMessage(admission.reason, dependencies.assistantName), "guest-limit");
+        return;
+      }
+      if (admission.firstContact && !isGroup && dependencies.guestDisclosure) {
+        await sendNotice(space, message, false, dependencies.guestDisclosure, "first-contact");
+      }
+    }
+
+    if (role === "owner" && senderId && !isGroup && dependencies.resolveOwnerReply) {
+      const handled = await dependencies.resolveOwnerReply({ message, texts: directTexts, spaceId: space.id, senderId });
+      if (handled) {
+        await sendNotice(space, message, false, handled, "scheduling-reply");
+        dependencies.onReplyDelivered?.();
+        return;
+      }
+    }
+
+    const confirmation = role === "owner" ? await dependencies.consumeEmailConfirmation(space.id, directTexts) : {};
+    const action = role === "owner" && dependencies.consumeActionConfirmation
+      ? await dependencies.consumeActionConfirmation(space.id, directTexts)
+      : {};
     const context: ToolRunContext = {
       config: { timezone: dependencies.timezone },
       spaceId: space.id,
       isGroup,
+      role,
+      senderId,
       space,
       message,
       richResponseSent: false,
       confirmedEmailDraftId: confirmation.confirmedDraftId,
+      confirmedActionKey: action.confirmedActionKey,
       sideEffectAttempted: false,
+      untrustedContentSeen: false,
       sendVoice: async (text) => {
         const audio = await dependencies.synthesizeVoice(text);
         await space.send(voice(audio, { mimeType: "audio/aac", name: `${dependencies.assistantName} voice reply.m4a` }));
@@ -200,17 +270,7 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
             });
           }
         }
-        if (!failureDelivered) {
-          try {
-            if (isGroup) await message.reply(markdown(failure));
-            else await space.send(markdown(failure));
-          } catch (deliveryError) {
-            console.error("Unable to deliver the fallback failure notice:", {
-              name: deliveryError instanceof Error ? deliveryError.name : "UnknownError",
-              message: deliveryError instanceof Error ? deliveryError.message : String(deliveryError),
-            });
-          }
-        }
+        if (!failureDelivered) await sendNotice(space, message, isGroup, failure, "fallback failure");
       }
     }
   };

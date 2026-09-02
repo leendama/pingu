@@ -8,18 +8,24 @@ export type JsonObject = Record<string, unknown>;
 type FunctionTool = Extract<Tool, { type: "function" }>;
 
 /**
- * One tool, declared once: schema, privacy, mutability, and executor together.
+ * One tool, declared once: schema, privacy, mutability, audience, and executor together.
  * `private` and `sideEffecting` default to true so an omission fails safe.
  * pure or group-safe tools must say so explicitly.
  */
 export interface ToolDeclaration {
   schema: FunctionTool;
-  /** Touches the owner's private account; the registry blocks it in group chats. Defaults to true. */
+  /** Touches the owner's private account; exists only in the verified owner's direct messages. Defaults to true. */
   private?: boolean;
   /** May mutate external or durable state; attempting it disables turn replay. Defaults to true. */
   sideEffecting?: boolean;
+  /** Only offered to guests, never to the owner. Defaults to false. */
+  guestOnly?: boolean;
+  /** Only offered in direct messages, never in groups. Defaults to false. */
+  directOnly?: boolean;
   /** Only meaningful inside a group chat; rejected elsewhere. Defaults to false. */
   groupOnly?: boolean;
+  /** Returns content written by third parties (email, meeting notes). Defaults to false. */
+  untrustedSource?: boolean;
   run(args: JsonObject, context: ToolRunContext): Promise<PluginRunResult>;
 }
 
@@ -28,11 +34,17 @@ export function capabilityPlugin(
   declarations: ToolDeclaration[],
 ): PinguPlugin {
   const byName = new Map(declarations.map((declaration) => [declaration.schema.name, declaration]));
+  const names = (predicate: (declaration: ToolDeclaration) => boolean) =>
+    declarations.filter(predicate).map((declaration) => declaration.schema.name);
   return {
     ...meta,
     tools: declarations.map((declaration) => declaration.schema),
-    sideEffectingTools: declarations.filter((declaration) => declaration.sideEffecting !== false).map((declaration) => declaration.schema.name),
-    privateTools: declarations.filter((declaration) => declaration.private !== false).map((declaration) => declaration.schema.name),
+    sideEffectingTools: names((declaration) => declaration.sideEffecting !== false),
+    privateTools: names((declaration) => declaration.private !== false),
+    guestOnlyTools: names((declaration) => declaration.guestOnly === true),
+    directOnlyTools: names((declaration) => declaration.directOnly === true),
+    groupOnlyTools: names((declaration) => declaration.groupOnly === true),
+    untrustedSourceTools: names((declaration) => declaration.untrustedSource === true),
     async run(toolName, argumentsJson, context) {
       const declaration = byName.get(toolName);
       if (!declaration) return { output: JSON.stringify({ error: `Unknown tool: ${toolName}` }) };
@@ -67,4 +79,10 @@ export function stringArray(value: unknown): string[] {
 /** Collapse CR/LF so a model-supplied value cannot inject extra headers into mail or API payloads. */
 export function cleanHeader(value: string): string {
   return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+/** Strip control characters, collapse whitespace, and cap length before text authored by a guest reaches a calendar or email field. */
+export function sanitiseText(value: string, maxLength: number): string {
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength - 1)}\u2026` : cleaned;
 }

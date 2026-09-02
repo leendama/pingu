@@ -8,7 +8,8 @@ export interface ReminderStore {
   cancel(spaceId: string, reminderId: string): Promise<boolean>;
 }
 
-export function remindersPlugin(store: ReminderStore): PinguPlugin {
+export function remindersPlugin(store: ReminderStore, options: { guestMaxReminders?: number } = {}): PinguPlugin {
+  const guestMax = options.guestMaxReminders ?? 5;
   return capabilityPlugin(
     { id: "reminders", name: "Reminders", description: "Persistent one-time and recurring reminders." },
     [
@@ -37,6 +38,9 @@ export function remindersPlugin(store: ReminderStore): PinguPlugin {
           const recurrence = stringValue(args.recurrence) as ReminderRecurrence | undefined;
           const timezone = stringValue(args.timezone) ?? context.config.timezone;
           if (!text || !dueAt || !recurrence) throw new Error("Reminder text, due time, and recurrence are required.");
+          if (context.role === "guest" && (await store.list(context.spaceId)).length >= guestMax) {
+            throw new Error(`Guests can hold at most ${guestMax} active reminders. Cancel one first.`);
+          }
           const reminder = await store.create({ spaceId: context.spaceId, text, dueAt, recurrence, timezone });
           return { output: JSON.stringify({ created: true, reminder }) };
         },

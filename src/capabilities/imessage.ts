@@ -1,8 +1,9 @@
 import { contact, poll, richlink } from "spectrum-ts";
 import type { PinguPlugin } from "../plugins.js";
-import { capabilityPlugin, stringArray, stringValue } from "../tools.js";
+import { capabilityPlugin, stringArray, stringValue, type JsonObject, type ToolRunContext } from "../tools.js";
 
-export function imessagePlugin(): PinguPlugin {
+export function imessagePlugin(options: { voice?: boolean } = {}): PinguPlugin {
+  const voiceEnabled = options.voice ?? true;
   return capabilityPlugin(
     { id: "imessage", name: "iMessage", description: "Reactions, polls, links, contact cards, voice, and group controls." },
     [
@@ -104,9 +105,9 @@ export function imessagePlugin(): PinguPlugin {
           return { delivered: true, output: JSON.stringify({ sent: true, type: "contact", name: nameValue }) };
         },
       },
-      {
+      ...(voiceEnabled ? [{
         schema: {
-          type: "function",
+          type: "function" as const,
           name: "send_voice_reply",
           description: "Send a short spoken reply as an audio message when the user explicitly asks for one.",
           strict: true,
@@ -118,13 +119,13 @@ export function imessagePlugin(): PinguPlugin {
           },
         },
         private: false,
-        run: async (args, context) => {
+        run: async (args: JsonObject, context: ToolRunContext) => {
           const text = stringValue(args.text);
           if (!text) throw new Error("Voice reply text is required.");
           await context.sendVoice(text);
           return { delivered: true, output: JSON.stringify({ sent: true, type: "voice" }) };
         },
-      },
+      }] : []),
       {
         schema: {
           type: "function",

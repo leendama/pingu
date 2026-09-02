@@ -1,21 +1,30 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Response } from "openai/resources/responses/responses";
+import type { Response, ResponseInputItem } from "openai/resources/responses/responses";
 import type { ToolRunContext } from "./plugins.js";
 import { createReplyGenerator, mayReplayResponseFailure } from "./reply-generator.js";
 
-function textResponse(text: string): Response {
-  return { output: [], output_text: text, status: "completed" } as unknown as Response;
+function textResponse(text: string, tokens = 10): Response {
+  return {
+    output: [{ type: "message", id: "msg-1", role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] }],
+    output_text: text,
+    status: "completed",
+    usage: { total_tokens: tokens },
+  } as unknown as Response;
 }
 
 function incompleteResponse(): Response {
   return { output: [], output_text: "", status: "incomplete", incomplete_details: { reason: "max_output_tokens" } } as unknown as Response;
 }
 
-function toolCallResponse(name: string, callId = "call-1"): Response {
+function toolCallResponse(name: string, callId = "call-1", withReasoning = false): Response {
   return {
-    output: [{ type: "function_call", name, call_id: callId, arguments: "{}" }],
+    output: [
+      ...(withReasoning ? [{ type: "reasoning", id: "rs-1", summary: [], encrypted_content: "opaque" }] : []),
+      { type: "function_call", id: "fc-1", name, call_id: callId, arguments: "{}" },
+    ],
     output_text: "",
     status: "completed",
+    usage: { total_tokens: 5 },
   } as unknown as Response;
 }
 
@@ -24,34 +33,29 @@ function statusError(status: number): Error & { status: number } {
 }
 
 function freshContext(): ToolRunContext {
-  return { spaceId: "chat", isGroup: false, richResponseSent: false, sideEffectAttempted: false } as ToolRunContext;
+  return { spaceId: "chat", isGroup: false, role: "owner", richResponseSent: false, sideEffectAttempted: false, untrustedContentSeen: false } as ToolRunContext;
 }
 
-function makeGenerator(respondScript: Array<Response | Error>, overrides: Record<string, unknown> = {}) {
-  const log: string[] = [];
-  const respond = vi.fn(async (_conversationId: string, _input: unknown) => {
+function makeGenerator(respondScript: Array<Response | Error>, overrides: Record<string, unknown> = {}, history: ResponseInputItem[] = []) {
+  const respond = vi.fn(async (_input: ResponseInputItem[], _context: ToolRunContext) => {
     const next = respondScript.shift();
     if (!next) throw new Error("respond script exhausted");
     if (next instanceof Error) throw next;
     return next;
   });
+  const transcripts = {
+    read: vi.fn(async () => history),
+    append: vi.fn(async (_spaceId: string, _items: ResponseInputItem[]) => undefined),
+    forget: vi.fn(async () => undefined),
+  };
   const deps = {
     respond,
-    createConversation: vi.fn(async () => {
-      log.push("create");
-      return "conv-fresh";
-    }),
-    conversations: {
-      get: vi.fn(async () => "conv-existing"),
-      clear: vi.fn(async () => {
-        log.push("clear");
-      }),
-    },
+    transcripts,
     runTool: vi.fn(async () => ({ handled: true, output: "{}" })),
     errorStatus: (error: unknown) => (error as { status?: number }).status,
     ...overrides,
   };
-  return { generate: createReplyGenerator(deps as never), respond, deps, log };
+  return { generate: createReplyGenerator(deps as never), respond, deps, transcripts };
 }
 
 describe("mayReplayResponseFailure", () => {
@@ -62,31 +66,62 @@ describe("mayReplayResponseFailure", () => {
 });
 
 describe("createReplyGenerator", () => {
+  it("sends the stored history plus the new message and appends the completed turn", async () => {
+    const history: ResponseInputItem[] = [{ type: "message", role: "user", content: "earlier" }];
+    const { generate, respond, transcripts } = makeGenerator([textResponse("hi")], {}, history);
+    await expect(generate("chat", "hello", freshContext())).resolves.toBe("hi");
+    const sent = respond.mock.calls[0]?.[0] as ResponseInputItem[];
+    expect(sent[0]).toEqual(history[0]);
+    expect(sent[1]).toEqual({ type: "message", role: "user", content: "hello" });
+    const appended = transcripts.append.mock.calls[0]?.[1] as ResponseInputItem[];
+    expect(appended.map((item) => item.type)).toEqual(["message", "message"]);
+  });
+
+  it("keeps function calls and their outputs in the history", async () => {
+    const { generate, respond, transcripts } = makeGenerator([toolCallResponse("get_current_time"), textResponse("done")]);
+    await expect(generate("chat", "time?", freshContext())).resolves.toBe("done");
+    const secondInput = respond.mock.calls[1]?.[0] as ResponseInputItem[];
+    expect(secondInput.map((item) => item.type)).toEqual(["message", "function_call", "function_call_output"]);
+    const appended = transcripts.append.mock.calls[0]?.[1] as ResponseInputItem[];
+    expect(appended.map((item) => item.type)).toEqual(["message", "function_call", "function_call_output", "message"]);
+  });
+
+  it("stores reasoning items only when the provider can accept them back", async () => {
+    const withReasoning = makeGenerator([toolCallResponse("get_current_time", "call-1", true), textResponse("done")], { keepReasoning: true });
+    await withReasoning.generate("chat", "time?", freshContext());
+    expect((withReasoning.transcripts.append.mock.calls[0]?.[1] as ResponseInputItem[]).some((item) => item.type === "reasoning")).toBe(true);
+
+    const without = makeGenerator([toolCallResponse("get_current_time", "call-1", true), textResponse("done")]);
+    await without.generate("chat", "time?", freshContext());
+    expect((without.transcripts.append.mock.calls[0]?.[1] as ResponseInputItem[]).some((item) => item.type === "reasoning")).toBe(false);
+  });
+
   for (const status of [400, 404]) {
-    it(`retries a ${status} exactly once on a fresh conversation`, async () => {
-      const { generate, respond, deps } = makeGenerator([statusError(status), textResponse("recovered")]);
+    it(`retries a ${status} exactly once after forgetting the chat's history`, async () => {
+      const { generate, respond, transcripts } = makeGenerator([statusError(status), textResponse("recovered")]);
       await expect(generate("chat", "hello", freshContext())).resolves.toBe("recovered");
       expect(respond).toHaveBeenCalledTimes(2);
-      expect(deps.conversations.clear).toHaveBeenCalledOnce();
-      expect(respond.mock.calls[0]?.[0]).toBe("conv-existing");
-      expect(respond.mock.calls[1]?.[0]).toBe("conv-fresh");
+      expect(transcripts.forget).toHaveBeenCalledOnce();
+      expect((respond.mock.calls[1]?.[0] as ResponseInputItem[])).toHaveLength(1);
+      expect(transcripts.append).toHaveBeenCalledOnce();
     });
   }
 
   it("retries an incomplete response exactly once", async () => {
-    const { generate, respond, deps } = makeGenerator([incompleteResponse(), textResponse("recovered")]);
+    const { generate, respond, transcripts } = makeGenerator([incompleteResponse(), textResponse("recovered")]);
     await expect(generate("chat", "hello", freshContext())).resolves.toBe("recovered");
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(deps.conversations.clear).toHaveBeenCalledOnce();
+    expect(transcripts.forget).toHaveBeenCalledOnce();
   });
 
-  it("never retries after a side effect was attempted", async () => {
-    const { generate, respond, deps } = makeGenerator([statusError(404)]);
+  it("never retries after a side effect was attempted and leaves the transcript untouched", async () => {
+    const { generate, respond, transcripts } = makeGenerator([statusError(404)]);
     const context = freshContext();
     context.sideEffectAttempted = true;
     await expect(generate("chat", "hello", context)).rejects.toThrow("model failure 404");
     expect(respond).toHaveBeenCalledTimes(1);
-    expect(deps.conversations.clear).not.toHaveBeenCalled();
+    expect(transcripts.forget).not.toHaveBeenCalled();
+    expect(transcripts.append).not.toHaveBeenCalled();
   });
 
   it("clears draftForReview and richResponseSent from the failed attempt before replaying", async () => {
@@ -107,16 +142,9 @@ describe("createReplyGenerator", () => {
   });
 
   it("does not attempt a third try when the retry also fails", async () => {
-    const { generate, respond, deps } = makeGenerator([statusError(404), statusError(404)]);
+    const { generate, respond } = makeGenerator([statusError(404), statusError(404)]);
     await expect(generate("chat", "hello", freshContext())).rejects.toThrow("model failure 404");
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(deps.createConversation).toHaveBeenCalledOnce();
-  });
-
-  it("clears the stored conversation before creating its replacement", async () => {
-    const { generate, log } = makeGenerator([statusError(404), textResponse("ok")]);
-    await generate("chat", "hello", freshContext());
-    expect(log).toEqual(["clear", "create"]);
   });
 
   it("stops the tool loop at the round limit", async () => {
@@ -131,7 +159,15 @@ describe("createReplyGenerator", () => {
       { runTool: vi.fn(async () => ({ handled: false, output: "" })) },
     );
     await expect(generate("chat", "hello", freshContext())).resolves.toBe("done");
-    const secondInput = respond.mock.calls[1]?.[1] as unknown as Array<{ call_id: string; output: string }>;
-    expect(secondInput[0]).toMatchObject({ call_id: "call-9", output: JSON.stringify({ error: "Unknown tool: mystery_tool" }) });
+    const secondInput = respond.mock.calls[1]?.[0] as ResponseInputItem[];
+    expect(secondInput.at(-1)).toMatchObject({ call_id: "call-9", output: JSON.stringify({ error: "Unknown tool: mystery_tool" }) });
+  });
+
+  it("reports the whole turn's token usage once", async () => {
+    const onUsage = vi.fn();
+    const { generate } = makeGenerator([toolCallResponse("get_current_time"), textResponse("done", 20)], { onUsage });
+    await generate("chat", "time?", freshContext());
+    expect(onUsage).toHaveBeenCalledOnce();
+    expect(onUsage.mock.calls[0]?.[0]).toEqual({ totalTokens: 25 });
   });
 });

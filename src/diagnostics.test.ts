@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runDiagnostics, type DiagnosticsProbes } from "./diagnostics.js";
+import type { ProviderCapabilities } from "./provider.js";
 
 const google = { clientId: "client-1", clientSecret: "secret", refreshToken: "token" };
 
@@ -9,9 +10,16 @@ const allScopes = [
   "https://www.googleapis.com/auth/gmail.compose",
 ];
 
+function capabilities(overrides: Partial<ProviderCapabilities> = {}): ProviderCapabilities {
+  return {
+    kind: "openai", modelListing: true, response: true, functionCalling: true, toolContinuation: true,
+    reasoningParameters: true, voice: true, problems: [], ...overrides,
+  };
+}
+
 function probes(overrides: Partial<DiagnosticsProbes> = {}): DiagnosticsProbes {
   return {
-    openai: async () => undefined,
+    provider: async () => capabilities(),
     googleScopes: async () => allScopes,
     googleCalendar: async () => undefined,
     granola: async () => undefined,
@@ -28,21 +36,38 @@ function byName(checks: Awaited<ReturnType<typeof runDiagnostics>>, name: string
 describe("runDiagnostics", () => {
   it("reports everything healthy when every probe passes", async () => {
     const checks = await runDiagnostics(input, probes());
-    expect(byName(checks, "openai").status).toBe("ok");
+    expect(byName(checks, "provider").status).toBe("ok");
+    expect(byName(checks, "provider").detail).toContain("function calling");
     expect(byName(checks, "google").status).toBe("ok");
     expect(byName(checks, "granola").status).toBe("ok");
   });
 
-  it("says an OpenAI key was rejected on a 401 and names an unavailable model on a 404", async () => {
+  it("says an API key was rejected on a 401 and names a missing model on a 404", async () => {
     const unauthorized = await runDiagnostics(input, probes({
-      openai: async () => { throw Object.assign(new Error("Unauthorized"), { status: 401 }); },
+      provider: async () => capabilities({ response: false, functionCalling: false, toolContinuation: false, problems: ["Basic response failed: 401 Unauthorized"] }),
     }));
-    expect(byName(unauthorized, "openai")).toMatchObject({ status: "failed", detail: expect.stringContaining("rejected the API key") });
+    expect(byName(unauthorized, "provider")).toMatchObject({ status: "failed", detail: expect.stringContaining("Check the API key") });
 
     const missingModel = await runDiagnostics(input, probes({
-      openai: async () => { throw Object.assign(new Error("Not found"), { status: 404 }); },
+      provider: async () => capabilities({ response: false, functionCalling: false, toolContinuation: false, problems: ["Basic response failed: 404 model not found"] }),
     }));
-    expect(byName(missingModel, "openai").detail).toContain('the model "gpt-5.6-luna" is not available');
+    expect(byName(missingModel, "provider").detail).toContain('Check that the model "gpt-5.6-luna" exists');
+  });
+
+  it("fails a compatible endpoint that cannot call tools and says what Pingu needs", async () => {
+    const checks = await runDiagnostics({ ...input, openaiBaseUrl: "http://localhost:11434/v1" }, probes({
+      provider: async () => capabilities({ kind: "compatible", voice: false, functionCalling: false, toolContinuation: false, problems: ["Function calling failed: the model did not call the tool"] }),
+    }));
+    expect(byName(checks, "provider")).toMatchObject({ label: "Model endpoint", status: "failed" });
+    expect(byName(checks, "provider").detail).toContain("supports function calling");
+  });
+
+  it("keeps a working endpoint ok when only optional parameters are unsupported", async () => {
+    const checks = await runDiagnostics(input, probes({
+      provider: async () => capabilities({ reasoningParameters: false, problems: ["Reasoning parameters are not supported: 400"] }),
+    }));
+    expect(byName(checks, "provider").status).toBe("ok");
+    expect(byName(checks, "provider").detail).toContain("Notes:");
   });
 
   it("names the missing Google permission instead of a raw scope string", async () => {
@@ -56,11 +81,12 @@ describe("runDiagnostics", () => {
     expect(byName(checks, "google").detail).toContain("Reconnect Google");
   });
 
-  it("recognises a revoked Google sign-in and an unconnected Google", async () => {
+  it("recognises a revoked Google sign-in, mentions the Testing-mode expiry, and an unconnected Google", async () => {
     const revoked = await runDiagnostics(input, probes({
       googleScopes: async () => { throw new Error("invalid_grant: Token has been expired or revoked."); },
     }));
     expect(byName(revoked, "google").detail).toContain("no longer valid");
+    expect(byName(revoked, "google").detail).toContain("seven days");
 
     const unconnected = await runDiagnostics({ ...input, google: undefined }, probes({
       googleScopes: async () => { throw new Error("ENOENT: no such file or directory, open 'credentials.json'"); },

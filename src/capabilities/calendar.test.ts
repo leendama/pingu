@@ -1,6 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { getPendingAction } from "../pending-confirmations.js";
 import type { ToolRunContext } from "../plugins.js";
-import { calendarPlugin, type CalendarEventData, type CalendarPort } from "./calendar.js";
+import { calendarPlugin, deleteConfirmationReason, type CalendarEventData, type CalendarPort } from "./calendar.js";
+
+let directory: string;
+beforeAll(async () => {
+  directory = await mkdtemp(join(tmpdir(), "pingu-calendar-test-"));
+  process.env.PHOTON_DATA_DIR = directory;
+});
+afterAll(async () => {
+  delete process.env.PHOTON_DATA_DIR;
+  await rm(directory, { recursive: true, force: true });
+});
 
 interface RecordedCall {
   method: "list" | "get" | "insert" | "patch" | "delete";
@@ -25,7 +39,9 @@ function fakePort(calls: RecordedCall[], initial: CalendarEventData[] = [], cale
     },
     async insertEvent(requestBody, sendUpdates) {
       calls.push({ method: "insert", requestBody, sendUpdates });
-      return { id: "evt-new", summary: String(requestBody.summary) };
+      const event = { id: "evt-new", ...requestBody } as CalendarEventData;
+      events.set("evt-new", event);
+      return event;
     },
     async patchEvent(eventId, requestBody, sendUpdates) {
       calls.push({ method: "patch", eventId, requestBody, sendUpdates });
@@ -40,7 +56,7 @@ function fakePort(calls: RecordedCall[], initial: CalendarEventData[] = [], cale
   };
 }
 
-const context = { isGroup: false, config: { timezone: "UTC" } } as ToolRunContext;
+const context = { isGroup: false, role: "owner", spaceId: "chat", config: { timezone: "UTC" }, untrustedContentSeen: false } as ToolRunContext;
 
 describe("calendarPlugin", () => {
   it("creates a timed event with the configured timezone and notifies attendees only when present", async () => {
@@ -120,15 +136,69 @@ describe("calendarPlugin", () => {
     expect(JSON.parse(oneSided.output).error).toMatch(/both new_start and new_end/);
   });
 
-  it("deletes an exact event and notifies attendees", async () => {
+  it("deletes one personal event in one step, notifies attendees, and verifies it is gone", async () => {
     const calls: RecordedCall[] = [];
-    const result = await calendarPlugin(fakePort(calls)).run(
+    const result = await calendarPlugin(fakePort(calls, [{ id: "evt-9", summary: "Gym" }])).run(
       "delete_calendar_event",
       JSON.stringify({ event_id: "evt-9" }),
       context,
     );
-    expect(JSON.parse(result.output)).toEqual({ deleted: true, event_id: "evt-9" });
-    expect(calls).toEqual([{ method: "delete", eventId: "evt-9", sendUpdates: "all" }]);
+    expect(JSON.parse(result.output)).toMatchObject({ deleted: true, verified: true, event_id: "evt-9" });
+    expect(calls.map((call) => call.method)).toEqual(["get", "delete", "get"]);
+    expect(calls[1]).toEqual({ method: "delete", eventId: "evt-9", sendUpdates: "all" });
+  });
+
+  it("refuses to delete an event that no longer exists", async () => {
+    const result = await calendarPlugin(fakePort([])).run("delete_calendar_event", JSON.stringify({ event_id: "gone" }), context);
+    expect(JSON.parse(result.output).error).toMatch(/not found. Nothing was changed/);
+  });
+
+  it("asks before deleting an event with attendees, then deletes once the owner's yes arrives", async () => {
+    const calls: RecordedCall[] = [];
+    const withGuests = { id: "evt-team", summary: "Team sync", attendees: [{ email: "me@example.com", self: true }, { email: "a@example.com" }, { email: "b@example.com" }] };
+    const plugin = calendarPlugin(fakePort(calls, [withGuests]));
+    const first = await plugin.run("delete_calendar_event", JSON.stringify({ event_id: "evt-team" }), context);
+    expect(JSON.parse(first.output)).toMatchObject({ confirmation_required: true, event: { attendees: 2 } });
+    expect(JSON.parse(first.output).reason).toContain("2 attendees would receive a cancellation email");
+    expect(calls.some((call) => call.method === "delete")).toBe(false);
+    expect(await getPendingAction("chat")).toMatchObject({ key: "delete_event:evt-team" });
+
+    const confirmed = await plugin.run("delete_calendar_event", JSON.stringify({ event_id: "evt-team" }), { ...context, confirmedActionKey: "delete_event:evt-team" });
+    expect(JSON.parse(confirmed.output)).toMatchObject({ deleted: true, verified: true });
+  });
+
+  it("asks before deleting a recurring event and after reading third-party content", () => {
+    expect(deleteConfirmationReason({ id: "r", recurringEventId: "series" }, context)).toContain("recurring");
+    expect(deleteConfirmationReason({ id: "p" }, context)).toBeUndefined();
+    expect(deleteConfirmationReason({ id: "p" }, { untrustedContentSeen: true })).toContain("written by someone else");
+  });
+
+  it("asks before a bulk plan deletes duplicates", async () => {
+    const calls: RecordedCall[] = [];
+    const plugin = calendarPlugin(fakePort(calls, [
+      { id: "a", summary: "Course lessons 1-2", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T10:00:00Z" } },
+      { id: "copy", summary: "Course lessons 1-2", start: { dateTime: "2026-09-03T09:00:00Z" }, end: { dateTime: "2026-09-03T10:00:00Z" } },
+    ]));
+    const plan = {
+      moves: [{ event_id: "a", new_start: "2026-09-04T09:00:00Z", new_end: "2026-09-04T10:00:00Z", sequence_group: null }],
+      duplicate_event_ids: ["copy"], timezone: "UTC",
+    };
+    const first = await plugin.run("bulk_reschedule_calendar_events", JSON.stringify(plan), context);
+    expect(JSON.parse(first.output)).toMatchObject({ confirmation_required: true, duplicate_event_ids: ["copy"] });
+    expect(calls.some((call) => call.method === "patch" || call.method === "delete")).toBe(false);
+    const confirmed = await plugin.run("bulk_reschedule_calendar_events", JSON.stringify(plan), { ...context, confirmedActionKey: "bulk_delete:copy" });
+    expect(JSON.parse(confirmed.output)).toEqual({ completed: true, moved_count: 1, deleted_duplicate_count: 1 });
+  });
+
+  it("reads a created event back before reporting success", async () => {
+    const calls: RecordedCall[] = [];
+    const port = fakePort(calls);
+    port.getEvent = async () => undefined;
+    const result = await calendarPlugin(port).run("create_calendar_event", JSON.stringify({
+      title: "Ghost", start: "2026-09-01T09:00:00", end: "2026-09-01T09:15:00",
+      timezone: "UTC", description: null, location: null, attendees: [],
+    }), context);
+    expect(JSON.parse(result.output).error).toMatch(/could not be read back/);
   });
 
   it("changes and verifies an event colour from a plain colour name", async () => {
@@ -192,7 +262,7 @@ describe("calendarPlugin", () => {
         { event_id: "b", new_start: "2026-09-05T09:00:00Z", new_end: "2026-09-05T10:00:00Z", sequence_group: "Course lessons" },
       ],
       duplicate_event_ids: ["copy"], timezone: "UTC",
-    }), context);
+    }), { ...context, confirmedActionKey: "bulk_delete:copy" });
     expect(JSON.parse(result.output)).toEqual({ completed: true, moved_count: 2, deleted_duplicate_count: 1 });
     const deleteIndex = calls.findIndex((call) => call.method === "delete");
     const lastMoveVerification = Math.max(...calls.map((call, index) => call.method === "get" && (call.eventId === "a" || call.eventId === "b") ? index : -1));

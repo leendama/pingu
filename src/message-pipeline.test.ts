@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Message, Space } from "spectrum-ts";
 import type { PendingEmail } from "./pending-emails.js";
-import { combineInboundMessages, createMessageProcessor, spaceKind } from "./message-pipeline.js";
+import { combineInboundMessages, createMessageProcessor, inboundSenderId, spaceKind } from "./message-pipeline.js";
 
 const pending: PendingEmail = {
   spaceId: "chat",
@@ -14,15 +14,16 @@ const pending: PendingEmail = {
   createdAt: new Date().toISOString(),
 };
 
-function inboundMessage(text = "draft an email"): Message {
+function inboundMessage(text = "draft an email", senderId: string | null = "owner-1"): Message {
   return {
     direction: "inbound",
     content: { type: "text", text },
+    sender: senderId ? { id: senderId, __platform: "imessage" } : undefined,
     reply: vi.fn(async () => undefined),
   } as unknown as Message;
 }
 
-function replyMessage(replyText: string, targetText: string): Message {
+function replyMessage(replyText: string, targetText: string, senderId = "owner-1"): Message {
   return {
     direction: "inbound",
     content: {
@@ -34,6 +35,7 @@ function replyMessage(replyText: string, targetText: string): Message {
         content: { type: "text", text: targetText },
       },
     },
+    sender: { id: senderId, __platform: "imessage" },
     reply: vi.fn(async () => undefined),
   } as unknown as Message;
 }
@@ -64,12 +66,14 @@ async function sentContentText(send: ReturnType<typeof vi.fn>, callIndex: number
 function dependencies() {
   return {
     assistantName: "Pingu",
+    ownerName: "Alex",
     timezone: "UTC",
     progressDelayMs: 60_000,
     synthesizeVoice: vi.fn(async () => Buffer.from("audio")),
     consumeEmailConfirmation: vi.fn(async () => ({})),
     getPendingEmail: vi.fn(async () => pending),
     markEmailReviewed: vi.fn(async () => undefined),
+    resolveRole: vi.fn(async (senderId: string | undefined) => senderId === "owner-1" ? "owner" as const : "guest" as const),
     generateReply: vi.fn(async (_spaceId, _text, context) => {
       context.draftForReview = "draft-1";
       return "model output is replaced by the canonical draft";
@@ -201,5 +205,106 @@ describe("message pipeline", () => {
     deps.generateReply.mockImplementation(async () => "Sent");
     await createMessageProcessor(deps)(directSpace(), [inboundMessage("send it"), inboundMessage("also grab milk")]);
     expect(deps.consumeEmailConfirmation).toHaveBeenCalledWith("chat", ["send it", "also grab milk"]);
+  });
+});
+
+describe("sender identity", () => {
+  it("reads the sender id from the message and never from the space", () => {
+    expect(inboundSenderId(inboundMessage("hi", "abc"))).toBe("abc");
+    expect(inboundSenderId(inboundMessage("hi", null))).toBeUndefined();
+  });
+
+  it("passes the resolved role and sender id to the model turn", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    await createMessageProcessor(deps)(directSpace(), inboundMessage("hi", "stranger-9"));
+    const context = deps.generateReply.mock.calls[0]?.[2] as { role: string; senderId?: string };
+    expect(context).toMatchObject({ role: "guest", senderId: "stranger-9" });
+    expect(deps.consumeEmailConfirmation).not.toHaveBeenCalled();
+  });
+
+  it("fails closed to guest when the platform recorded no sender", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    await createMessageProcessor(deps)(directSpace(), inboundMessage("hi", null));
+    expect(deps.resolveRole).toHaveBeenCalledWith(undefined);
+    expect((deps.generateReply.mock.calls[0]?.[2] as { role: string }).role).toBe("guest");
+  });
+
+  it("redeems a claim code without involving the model", async () => {
+    const deps = dependencies();
+    const redeemClaim = vi.fn(async (text: string) => text.startsWith("PINGU") ? "verified" as const : undefined);
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, redeemClaim })(directSpace(send), inboundMessage("PINGU-4F7K2Q", "new-owner"));
+    expect(redeemClaim).toHaveBeenCalledWith("PINGU-4F7K2Q", { senderId: "new-owner", spaceId: "chat" });
+    expect(deps.generateReply).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("Verified");
+  });
+
+  it("does not redeem claim codes from a group chat", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const redeemClaim = vi.fn(async () => "verified" as const);
+    const space = { ...directSpace(), type: "group" } as unknown as Space;
+    await createMessageProcessor({ ...deps, redeemClaim })(space, inboundMessage("PINGU-4F7K2Q", "someone"));
+    expect(redeemClaim).not.toHaveBeenCalled();
+  });
+});
+
+describe("guest handling", () => {
+  it("shows the disclosure once on first contact, then answers", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "Sure");
+    const admitGuest = vi.fn(async () => ({ allowed: true as const, firstContact: true, remaining: 19 }));
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, admitGuest, guestDisclosure: "Hi, I'm Pingu, Alex's assistant." })(directSpace(send), inboundMessage("is alex free friday?", "guest-1"));
+    expect(admitGuest).toHaveBeenCalledWith("guest-1");
+    expect(await sentContentText(send, 0)).toContain("Alex's assistant");
+    expect(await sentContentText(send, 1)).toContain("Sure");
+  });
+
+  it("stops answering a guest past the daily cap and says so", async () => {
+    const deps = dependencies();
+    const admitGuest = vi.fn(async () => ({ allowed: false as const, firstContact: false, reason: "sender-cap" as const }));
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, admitGuest })(directSpace(send), inboundMessage("again", "guest-1"));
+    expect(deps.generateReply).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("message limit");
+  });
+
+  it("never counts the owner against guest limits", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const admitGuest = vi.fn(async () => ({ allowed: true as const, firstContact: false, remaining: 1 }));
+    await createMessageProcessor({ ...deps, admitGuest })(directSpace(), inboundMessage("hi", "owner-1"));
+    expect(admitGuest).not.toHaveBeenCalled();
+  });
+});
+
+describe("owner replies to scheduling requests", () => {
+  it("lets the owner's yes resolve a request without the model", async () => {
+    const deps = dependencies();
+    const resolveOwnerReply = vi.fn(async () => "Booked and invitation sent.");
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, resolveOwnerReply })(directSpace(send), replyMessage("yes", "📅 Request PK-4F7K from Sam"));
+    expect(resolveOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ texts: ["yes"], spaceId: "chat", senderId: "owner-1" }));
+    expect(deps.generateReply).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("Booked");
+  });
+
+  it("falls through to the model when the reply is not a scheduling decision", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const resolveOwnerReply = vi.fn(async () => undefined);
+    await createMessageProcessor({ ...deps, resolveOwnerReply })(directSpace(), inboundMessage("what's on today?"));
+    expect(deps.generateReply).toHaveBeenCalledOnce();
+  });
+
+  it("never offers scheduling resolution to guests", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const resolveOwnerReply = vi.fn(async () => "should not happen");
+    await createMessageProcessor({ ...deps, resolveOwnerReply })(directSpace(), inboundMessage("yes", "guest-1"));
+    expect(resolveOwnerReply).not.toHaveBeenCalled();
   });
 });

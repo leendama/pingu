@@ -16,6 +16,8 @@ export interface MessagePipelineDependencies {
   consumeEmailConfirmation: (spaceId: string, texts: readonly string[]) => Promise<ConfirmationResult>;
   getPendingEmail: (spaceId: string) => Promise<PendingEmail | undefined>;
   markEmailReviewed: (spaceId: string, draftId: string) => Promise<void>;
+  /** Called once per turn after a reply (text or rich response) reaches the user. */
+  onReplyDelivered?: () => void;
 }
 
 export function formatEmailDraft(email: PendingEmail): string {
@@ -150,6 +152,7 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
 
       if (context.richResponseSent && !context.draftForReview) {
         if (progressMessage) await progressMessage.unsend().catch(() => undefined);
+        dependencies.onReplyDelivered?.();
         return;
       }
 
@@ -169,6 +172,7 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
         await space.send(markdown(reply));
       }
       deliverySucceeded = true;
+      dependencies.onReplyDelivered?.();
 
       if (context.draftForReview) {
         await dependencies.markEmailReviewed(space.id, context.draftForReview);

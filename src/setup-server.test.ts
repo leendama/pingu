@@ -17,6 +17,13 @@ vi.mock("./google.js", () => ({
   }),
 }));
 
+vi.mock("./diagnostics.js", () => ({
+  runDiagnostics: async () => [
+    { name: "openai", label: "OpenAI", status: "ok", detail: "The key can use gpt-5.6-luna." },
+    { name: "google", label: "Google Calendar and Gmail", status: "failed", detail: "Gmail permission is missing. Reconnect Google and approve every permission." },
+  ],
+}));
+
 const directories: string[] = [];
 const servers: Server[] = [];
 
@@ -155,6 +162,23 @@ describe("setup save", () => {
     const html = await response.text();
     expect(html).toContain("Saved, but the assistant could not start: Photon authentication failed");
     expect(html).not.toContain("Saved and running.");
+  });
+});
+
+describe("connection tests", () => {
+  it("renders each check with its plain-language outcome", async () => {
+    const { base } = await startServer();
+    await saveConfig(savedConfig);
+    const response = await fetch(`${base}/setup/test`, { method: "POST", headers: { cookie: await loginCookie(base) } });
+    const html = await response.text();
+    expect(html).toContain("Connection tests");
+    expect(html).toContain("The key can use gpt-5.6-luna.");
+    expect(html).toContain("Gmail permission is missing");
+  });
+
+  it("requires authentication", async () => {
+    const { base } = await startServer();
+    expect((await fetch(`${base}/setup/test`, { method: "POST" })).status).toBe(401);
   });
 });
 

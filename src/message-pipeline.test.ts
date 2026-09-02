@@ -169,6 +169,19 @@ describe("message pipeline", () => {
     expect(deps.consumeEmailConfirmation).toHaveBeenCalledWith("chat", ["send it"]);
   });
 
+  it("reports a delivered reply, and stays silent when delivery fails", async () => {
+    const delivered = dependencies();
+    const onReplyDelivered = vi.fn();
+    await createMessageProcessor({ ...delivered, onReplyDelivered })(directSpace(), inboundMessage());
+    expect(onReplyDelivered).toHaveBeenCalledOnce();
+
+    const failing = dependencies();
+    const notCalled = vi.fn();
+    const send = vi.fn(async (_content: unknown) => { throw new Error("delivery failed"); });
+    await createMessageProcessor({ ...failing, onReplyDelivered: notCalled })(directSpace(send), inboundMessage());
+    expect(notCalled).not.toHaveBeenCalled();
+  });
+
   it("matches each message of a burst against the confirmation, not the combined prose", async () => {
     const deps = dependencies();
     deps.generateReply.mockImplementation(async () => "Sent");

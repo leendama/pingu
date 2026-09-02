@@ -1,0 +1,12 @@
+services:
+  pingu:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file: .env
+    volumes:
+      - pingu-data:/var/data/photon
+    restart: unless-stopped
+
+volumes:
+  pingu-data:

@@ -21,7 +21,7 @@ export function googleOAuthClient(
 
 const cachedClients = new Map<string, ReturnType<typeof createGoogleClient>>();
 
-async function createGoogleClient(credentials?: RuntimeSettings["google"]) {
+async function createGoogleAuth(credentials?: RuntimeSettings["google"]) {
   let clientId = credentials?.clientId;
   let clientSecret = credentials?.clientSecret;
   let redirectUri = credentials?.redirectUri;
@@ -36,7 +36,20 @@ async function createGoogleClient(credentials?: RuntimeSettings["google"]) {
   }
   const auth = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
   auth.setCredentials(token);
+  return auth;
+}
+
+async function createGoogleClient(credentials?: RuntimeSettings["google"]) {
+  const auth = await createGoogleAuth(credentials);
   return { calendar: google.calendar({ version: "v3", auth }), gmail: google.gmail({ version: "v1", auth }) };
+}
+
+/** Refresh an access token and report which OAuth scopes Google actually granted. Throws when the sign-in is no longer valid. */
+export async function googleGrantedScopes(credentials?: RuntimeSettings["google"]): Promise<string[]> {
+  const auth = await createGoogleAuth(credentials);
+  const token = await auth.getAccessToken();
+  if (!token.token) throw new Error("Google did not return an access token.");
+  return (await auth.getTokenInfo(token.token)).scopes ?? [];
 }
 
 export async function googleClient(credentials?: RuntimeSettings["google"]) {

@@ -31,6 +31,28 @@ npm run connect:google
 
 Your browser opens for approval. The token is saved in `data/google-token.json`.
 
+## Check your setup
+
+Before starting the assistant, or whenever something misbehaves:
+
+```bash
+npm run doctor
+```
+
+It tests every connection it can reach — the OpenAI key and model, the Google sign-in and its calendar and Gmail permissions, and the Granola key — and says in plain language what is wrong with any that fail. Photon credentials are verified when the assistant starts; the final proof is Pingu replying to a text.
+
+In the browser wizard, the **Test connections** button runs the same checks. Once the assistant is running, the setup page also shows when Pingu last replied to a message.
+
+To keep Pingu running on a Mac across logouts and reboots, create a LaunchAgent that runs `npm run start` in this folder, or use the Docker option below.
+
+## Run with Docker Compose
+
+```bash
+docker compose up -d
+```
+
+This builds the image, keeps it running across reboots, and stores all data on a named volume so redeploys keep your configuration.
+
 ## Use the browser setup wizard
 
 The browser wizard is handy for Docker or another always-on host.
@@ -48,7 +70,7 @@ The wizard encrypts your saved keys and Google token with AES-256-GCM. Keep `PHO
 
 ## Run with Docker
 
-Build the image:
+The simplest way is Compose (see "Run with Docker Compose" above) — it handles the build, restarts, and the persistent volume. To do it manually instead:
 
 ```bash
 docker build -t pingu .

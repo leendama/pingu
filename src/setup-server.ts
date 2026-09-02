@@ -4,7 +4,9 @@ import helmet from "helmet";
 import { ZodError } from "zod";
 import type { StartOutcome } from "./agent-starter.js";
 import { loadConfig, publicUrl, saveConfig, type AssistantConfig } from "./config.js";
+import { runDiagnostics, type ConnectionCheck } from "./diagnostics.js";
 import { googleOAuthClient, googleScopes } from "./google.js";
+import { runtimeStatus } from "./runtime-status.js";
 
 function setupToken(): string {
   const token = process.env.PHOTON_SETUP_TOKEN;
@@ -34,16 +36,33 @@ function escapeHtml(value: unknown): string {
 }
 
 function page(body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up Pingu</title><style>body{font:16px/1.5 system-ui;background:#f4f5f3;color:#17201d;margin:0}.wrap{max-width:700px;margin:40px auto;padding:16px}main{background:white;border:1px solid #d9ddd9;border-radius:18px;padding:32px}label{display:block;font-weight:650;margin-top:16px}input{width:100%;box-sizing:border-box;padding:11px;border:1px solid #bcc5bf;border-radius:9px;font:inherit}button,.button{display:inline-block;margin-top:22px;padding:11px 18px;border:0;border-radius:999px;background:#185c46;color:white;font-weight:700;text-decoration:none}.status{padding:12px;background:#eaf4ed;border-radius:10px}.warn{background:#fff0dc}small{color:#5c675f}code{overflow-wrap:anywhere}</style></head><body><div class="wrap"><main>${body}</main></div></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Set up Pingu</title><style>body{font:16px/1.5 system-ui;background:#f4f5f3;color:#17201d;margin:0}.wrap{max-width:700px;margin:40px auto;padding:16px}main{background:white;border:1px solid #d9ddd9;border-radius:18px;padding:32px}label{display:block;font-weight:650;margin-top:16px}input{width:100%;box-sizing:border-box;padding:11px;border:1px solid #bcc5bf;border-radius:9px;font:inherit}button,.button{display:inline-block;margin-top:22px;padding:11px 18px;border:0;border-radius:999px;background:#185c46;color:white;font-weight:700;text-decoration:none}.status{padding:12px;background:#eaf4ed;border-radius:10px}.warn{background:#fff0dc}ul.checks{list-style:none;padding:0}ul.checks li{padding:10px 12px;border-radius:10px;margin:6px 0}.check-ok{background:#eaf4ed}.check-failed{background:#fde8e4}.check-skipped{background:#f0f1ef;color:#5c675f}small{color:#5c675f}code{overflow-wrap:anywhere}</style></head><body><div class="wrap"><main>${body}</main></div></body></html>`;
 }
 
 function login(error = ""): string {
   return page(`<h1>Unlock setup</h1>${error ? `<p class="status warn">${escapeHtml(error)}</p>` : ""}<form method="post" action="/setup/login"><label>Setup token</label><input type="password" name="token" required><button>Continue</button></form>`);
 }
 
-function setup(config?: AssistantConfig, message = ""): string {
+function renderChecks(checks?: ConnectionCheck[]): string {
+  if (!checks) return "";
+  const icon = { ok: "✓", failed: "✗", skipped: "–" } as const;
+  return `<h2>Connection tests</h2><ul class="checks">${checks.map((check) =>
+    `<li class="check-${check.status}"><strong>${icon[check.status]} ${escapeHtml(check.label)}</strong> — ${escapeHtml(check.detail)}</li>`,
+  ).join("")}</ul>`;
+}
+
+function renderRuntime(config?: AssistantConfig): string {
+  if (!config?.google.refreshToken) return "";
+  const status = runtimeStatus();
+  if (!status.startedAt) return "";
+  return status.lastReplyAt
+    ? `<p class="status">Pingu is ready. It replied to a text at ${escapeHtml(new Date(status.lastReplyAt).toLocaleString())}.</p>`
+    : `<p class="status">Pingu is running. Text your iMessage line — reload this page after it replies to confirm the whole chain works.</p>`;
+}
+
+function setup(config?: AssistantConfig, message = "", checks?: ConnectionCheck[]): string {
   const callback = `${publicUrl()}/auth/google/callback`;
-  return page(`<h1>Set up your assistant</h1><p>No source edits are required. Saved credentials are encrypted on the persistent disk.</p>${message ? `<p class="status">${escapeHtml(message)}</p>` : ""}<form method="post" action="/setup/save">
+  return page(`<h1>Set up your assistant</h1><p>No source edits are required. Saved credentials are encrypted on the persistent disk.</p>${message ? `<p class="status">${escapeHtml(message)}</p>` : ""}${renderRuntime(config)}${renderChecks(checks)}<form method="post" action="/setup/save">
   <label>Assistant name</label><input name="assistantName" value="${escapeHtml(config?.assistantName || "Pingu")}" required>
   <label>Your name</label><input name="ownerName" value="${escapeHtml(config?.ownerName)}" required>
   <label>Timezone</label><input name="timezone" value="${escapeHtml(config?.timezone || "UTC")}" required>
@@ -51,7 +70,8 @@ function setup(config?: AssistantConfig, message = ""): string {
   <h2>OpenAI</h2><label>API key</label><input type="password" name="openaiApiKey" placeholder="${config ? "Leave blank to keep saved value" : "sk-…"}" ${config ? "" : "required"}><label>Model</label><input name="model" value="${escapeHtml(config?.model || "gpt-5.6-luna")}" required>
   <h2>Google</h2><small>Create a Web OAuth client and add this authorised redirect URI:<br><code>${escapeHtml(callback)}</code></small><label>Client ID</label><input name="googleClientId" value="${escapeHtml(config?.google.clientId)}" required><label>Client secret</label><input type="password" name="googleClientSecret" placeholder="${config ? "Leave blank to keep saved value" : ""}" ${config ? "" : "required"}>
   <h2>Granola (optional)</h2><label>API key</label><input type="password" name="granolaApiKey" placeholder="${config ? "Leave blank to keep saved value" : ""}"><button>Save securely</button></form>
-  ${config && !config.google.refreshToken ? `<a class="button" href="/auth/google">Connect Google</a>` : ""}${config?.google.refreshToken ? "<p class=\"status\">Google is connected. Pingu is ready.</p>" : ""}`);
+  ${config && !config.google.refreshToken ? `<a class="button" href="/auth/google">Connect Google</a>` : ""}${config?.google.refreshToken ? "<p class=\"status\">Google is connected.</p>" : ""}
+  ${config ? `<form method="post" action="/setup/test"><button>Test connections</button></form>` : ""}`);
 }
 
 export function createSetupServer(onReady: (config: AssistantConfig) => Promise<StartOutcome>) {
@@ -61,7 +81,7 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
 
   app.get("/healthz", async (_request, response) => {
     const config = await loadConfig().catch(() => undefined);
-    response.json({ ok: true, configured: Boolean(config), googleConnected: Boolean(config?.google.refreshToken) });
+    response.json({ ok: true, configured: Boolean(config), googleConnected: Boolean(config?.google.refreshToken), ...runtimeStatus() });
   });
   app.post("/setup/login", (request, response) => {
     const supplied = String((request.body as Record<string, unknown>).token || "");
@@ -107,6 +127,19 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
       const message = error instanceof ZodError ? error.issues.map((issue) => issue.message).join(" ") : error instanceof Error ? error.message : "Setup failed.";
       response.status(400).send(setup(await loadConfig().catch(() => undefined), message));
     }
+  });
+  app.post("/setup/test", async (_request, response) => {
+    const config = await loadConfig().catch(() => undefined);
+    if (!config) return response.send(setup(undefined, "Save your settings before testing connections."));
+    const checks = await runDiagnostics({
+      openaiApiKey: config.openaiApiKey,
+      model: config.model,
+      granolaApiKey: config.granolaApiKey,
+      google: config.google.refreshToken
+        ? { clientId: config.google.clientId, clientSecret: config.google.clientSecret, refreshToken: config.google.refreshToken }
+        : undefined,
+    });
+    response.send(setup(config, "", checks));
   });
   app.get("/auth/google", async (_request, response) => {
     const config = await loadConfig();

@@ -11,6 +11,8 @@
 - `src/state.ts` provides serialized atomic JSON storage for conversations, pending emails, reminders, email alerts, and encrypted setup.
 - `src/email-alerts.ts` stores Gmail sender rules and polls for new matching messages while Pingu is running; its three chat tools live in `src/capabilities/email-alerts.ts`.
 - `src/poller.ts` is the one background tick loop the reminder and email-alert schedulers share.
+- `src/diagnostics.ts` tests every probeable connection (OpenAI, Google, Granola) and reports plain-language failures; the wizard's "Test connections" button and `npm run doctor` both cross this one interface.
+- `src/runtime-status.ts` records when the agent started and last replied; the wizard and `/healthz` read it as proof of life.
 - `src/setup-server.ts` handles browser setup and Google OAuth.
 - `src/config.ts` encrypts credentials saved through the browser wizard.
 - `src/runtime-settings.ts` resolves settings once and passes them into the agent and adapters.

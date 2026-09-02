@@ -12,6 +12,7 @@ import { googleGmailPort } from "./google.js";
 import { PluginRegistry } from "./plugins.js";
 import { startReminderScheduler } from "./reminders.js";
 import { createReplyGenerator } from "./reply-generator.js";
+import { markAgentStarted, markReplyDelivered } from "./runtime-status.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 import { KeyedBatchQueue } from "./task-queue.js";
 
@@ -107,6 +108,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     consumeEmailConfirmation: consumePendingEmailConfirmation,
     getPendingEmail,
     markEmailReviewed: markPendingEmailReviewed,
+    onReplyDelivered: markReplyDelivered,
     synthesizeVoice: async (text) => {
       const speech = await openai.audio.speech.create({
         model: "gpt-4o-mini-tts",
@@ -120,6 +122,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   });
 
   console.log(`${settings.assistantName} is connected and awaiting iMessages.`, { model: settings.model });
+  markAgentStarted();
   const messageQueue = new KeyedBatchQueue<{ space: Space; message: Message }>(1_500, async (_spaceId, entries) => {
     const latest = entries.at(-1);
     if (!latest) return;

@@ -64,6 +64,16 @@ describe("gmailPlugin", () => {
     });
   });
 
+  it("tells the model to look up a person's address before asking the owner", () => {
+    const plugin = gmailPlugin(fakePort({ raws: [], sent: [] }), fakeStore());
+    const instructions = plugin.instructions?.join(" ") ?? "";
+    const search = plugin.tools.find((tool) => tool.type === "function" && tool.name === "search_gmail");
+
+    expect(instructions).toContain("search Gmail before asking");
+    expect(instructions).toContain("headers clearly associate it with that person");
+    expect(search?.type === "function" ? search.description : "").toContain("find a person's email address");
+  });
+
   it("extracts full plain text from nested MIME parts and falls back to HTML", () => {
     const encoded = (value: string) => Buffer.from(value, "utf8").toString("base64url");
     expect(gmailBodyText({

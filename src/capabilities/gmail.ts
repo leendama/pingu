@@ -156,14 +156,17 @@ export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): 
       id: "gmail",
       name: "Gmail",
       description: "Search, read, draft, review, and confirmation-gated sending.",
-      instructions: ["Gmail search returns summaries. Call read_gmail_message with a result ID whenever the user asks to read, summarize, quote, or reply based on the full email."],
+      instructions: [
+        "Gmail search returns summaries with From and To headers. When the owner asks for someone's email address, or names an email recipient without an address, search Gmail before asking them for it. Search the inbox for mail from the person's name first; if needed, search sent and received mail by that name. Use an address only when the headers clearly associate it with that person. If there are no reliable matches, ask; if there are conflicting matches, show the short choices and ask which one.",
+        "Call read_gmail_message with a result ID whenever the user asks to read, summarize, quote, or reply based on the full email.",
+      ],
     },
     [
       {
         schema: {
           type: "function",
           name: "search_gmail",
-          description: "Search the user's Gmail and return sender, subject, date, and snippet for matching messages.",
+          description: "Search the user's Gmail and return sender, recipient, subject, date, and snippet for matching messages. Also use this to find a person's email address from message headers before asking the owner for it.",
           strict: true,
           parameters: {
             type: "object",

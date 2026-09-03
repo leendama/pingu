@@ -28,6 +28,8 @@ describe("agent wiring", () => {
     expect(instructions).toContain("fewest words possible");
     expect(instructions).toContain("2 to 12 words");
     expect(instructions).toContain("do not guess or act");
+    expect(instructions).toContain("search Gmail for that person before asking");
+    expect(instructions).toContain("nothing reliable or returns conflicting possibilities");
     expect(instructions).toContain("Never hide or ignore a failed tool call");
     expect(instructions).toContain("set_calendar_event_color");
   });

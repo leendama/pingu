@@ -19,7 +19,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --ground: #0a0a0a;
+    --ground: #18181b;
     --chat: #000000;
     --bar: rgba(28, 28, 30, 0.94);
     --line: #2c2c2e;
@@ -61,6 +61,10 @@ body {
     border-radius: 28px;
     overflow: hidden;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.12);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .phone { box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5); }
   }
 }
 
@@ -109,6 +113,10 @@ body {
 }
 
 .thread > * { flex-shrink: 0; }
+
+/* Messages sits the conversation on the bottom of the pane. margin-top on the
+   first child (not justify-content) keeps the top reachable once it overflows. */
+.thread > :first-child { margin-top: auto; }
 
 .stamp {
   align-self: center;

@@ -42,5 +42,16 @@ The sender id Spectrum reports, the name and purpose they typed, and the email t
 ## Deleting data
 
 - Ask Pingu to forget the current chat.
-- Delete everything: `npm run reset-data -- --yes`, or the **Delete all Pingu data** button on the setup page. Transcripts, reminders, alerts, drafts, guest records, verified owners, and booking requests are removed. Credentials and Google tokens are kept so you are not signed out; remove `PHOTON_DATA_DIR` entirely to drop those too.
-- Revoke Google access at any time from your Google account's third-party access page.
+- Delete everything Pingu remembers: `npm run reset-data -- --yes`, or the **Delete all Pingu data** button on the setup page. Transcripts, reminders, alerts, drafts, guest records, verified owners, and booking requests are removed. Credentials are kept so you are not signed out.
+- Retention also runs on its own: entries older than the retention window are removed from disk when a chat is read and by a cleanup pass every six hours, so a chat that never gets another message still expires.
+
+Credentials live in different places depending on how you set Pingu up:
+
+| Setup | Where credentials are | How to remove them |
+|---|---|---|
+| Browser wizard (Docker or hosted) | `config.enc.json` inside `PHOTON_DATA_DIR`, encrypted with `PHOTON_CONFIG_KEY` | Remove `PHOTON_DATA_DIR` (or the `pingu-data` volume) and forget `PHOTON_CONFIG_KEY` |
+| Local `.env` on a Mac | `.env` in the project folder, `credentials.json` (or `GOOGLE_CREDENTIALS_PATH`), and `google-token.json` inside `PHOTON_DATA_DIR` | Delete `.env` and `credentials.json` yourself; removing `PHOTON_DATA_DIR` drops only the token |
+
+Owner ids listed in `PINGU_OWNER_SENDER_IDS` keep granting owner access after any reset, because they live in your environment, not in the data directory. Remove them from `.env` or the host configuration to revoke them.
+
+Revoke Google access at any time from your Google account's third-party access page.

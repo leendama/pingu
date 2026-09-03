@@ -54,4 +54,15 @@ describe("built-in plugin policy", () => {
     await registry.run("read_gmail_message", JSON.stringify({ message_id: "m1" }), turn);
     expect(turn.untrustedContentSeen).toBe(true);
   });
+
+  it("lets only the owner rename a group or change its members", () => {
+    const guestInGroup = registry.toolsFor(context(true, "guest")).map((tool) => tool.type === "function" ? tool.name : "");
+    expect(guestInGroup).not.toContain("rename_group");
+    expect(guestInGroup).not.toContain("add_group_members");
+    expect(guestInGroup).not.toContain("remove_group_members");
+    expect(guestInGroup).toContain("send_poll");
+    const ownerInGroup = registry.toolsFor(context(true, "owner")).map((tool) => tool.type === "function" ? tool.name : "");
+    expect(ownerInGroup).toContain("rename_group");
+    expect(ownerInGroup).not.toContain("search_gmail");
+  });
 });

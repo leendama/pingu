@@ -8,7 +8,10 @@ import { minutesOfDay, type SchedulingSettings } from "./scheduling-settings.js"
 import { JsonFileStore } from "./state.js";
 import { sanitiseText } from "./tools.js";
 
-export type RequestStatus = "pending" | "booked" | "declined" | "expired" | "cancelled" | "failed";
+export type RequestStatus = "pending" | "approving" | "booked" | "cancelling" | "declined" | "expired" | "cancelled" | "failed";
+
+/** A transition older than this was interrupted by a crash or restart and is recovered by the poller. */
+export const STALE_TRANSITION_MS = 5 * 60_000;
 
 /** One guest's request to meet the owner. Approval and expiry state lives here, never in chat memory. */
 export interface SchedulingRequest {
@@ -24,6 +27,8 @@ export interface SchedulingRequest {
   guestTimezone: string;
   status: RequestStatus;
   createdAt: string;
+  /** When the current approving/cancelling transition began. */
+  transitionAt?: string;
   resolvedAt?: string;
   eventId?: string;
   meetLink?: string;
@@ -192,6 +197,27 @@ export interface SubmitInput {
   guestTimezone: string;
 }
 
+function eventTimeMs(value: unknown): number | undefined {
+  const time = value && typeof value === "object" ? value as { dateTime?: string | null; date?: string | null } : undefined;
+  const text = time?.dateTime ?? time?.date;
+  if (!text) return undefined;
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/** Everything the read-back event must match before a booking is reported as done. */
+export function bookingMismatches(event: CalendarEventData, request: Pick<SchedulingRequest, "startIso" | "endIso" | "email">): string[] {
+  const mismatches: string[] = [];
+  if (eventTimeMs(event.start) !== Date.parse(request.startIso)) mismatches.push("start time");
+  if (eventTimeMs(event.end) !== Date.parse(request.endIso)) mismatches.push("end time");
+  const attendees = Array.isArray(event.attendees) ? event.attendees as Array<{ email?: string | null }> : [];
+  if (!attendees.some((attendee) => attendee?.email?.toLowerCase() === request.email.toLowerCase())) mismatches.push("guest attendee");
+  if (event.status === "cancelled") mismatches.push("status");
+  return mismatches;
+}
+
+type ClaimResult = { claimed: true; request: SchedulingRequest } | { claimed: false; request?: SchedulingRequest };
+
 export function createSchedulingService(deps: SchedulingServiceDeps) {
   const { scheduling, timezone: ownerTimezone, ownerName, assistantName } = deps.settings;
   const now = deps.now ?? (() => Date.now());
@@ -265,6 +291,53 @@ export function createSchedulingService(deps: SchedulingServiceDeps) {
     return (await requestStore.read()).requests.filter((request) => request.guestSenderId === guestSenderId && request.status === "pending");
   }
 
+  async function updateRequest(code: string, patch: Partial<SchedulingRequest>): Promise<SchedulingRequest | undefined> {
+    return requestStore.update<SchedulingRequest | undefined>((state) => {
+      const request = state.requests.find((candidate) => candidate.code === code);
+      if (!request) return { result: undefined, changed: false };
+      Object.assign(request, patch);
+      return { result: request, changed: true };
+    });
+  }
+
+  /**
+   * Move one request from `from` to `to` in a single store transaction, so two
+   * chats acting on the same request at once cannot both proceed.
+   */
+  async function claimTransition(code: string, from: RequestStatus, to: RequestStatus): Promise<ClaimResult> {
+    return requestStore.update<ClaimResult>((state) => {
+      const request = state.requests.find((candidate) => candidate.code === code);
+      if (!request || request.status !== from) return { result: { claimed: false, request: request ? structuredClone(request) : undefined }, changed: false };
+      request.status = to;
+      request.transitionAt = new Date(now()).toISOString();
+      return { result: { claimed: true, request: structuredClone(request) }, changed: true };
+    });
+  }
+
+  async function notifyGuest(request: SchedulingRequest, text: string): Promise<void> {
+    await deps.send(request.guestSpaceId, text).catch((error) => {
+      console.error("Unable to notify the guest:", { code: request.code, message: error instanceof Error ? error.message : String(error) });
+    });
+  }
+
+  /** Deliver text to every owner chat and report how many actually received it. */
+  async function notifyOwners(text: string): Promise<number> {
+    let delivered = 0;
+    for (const spaceId of await ownerSpaces()) {
+      try {
+        await deps.send(spaceId, text);
+        delivered += 1;
+      } catch (error) {
+        console.error("Unable to deliver to an owner chat:", { spaceId, message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return delivered;
+  }
+
+  function expiryMs(request: SchedulingRequest): number {
+    return Date.parse(request.createdAt) + scheduling.requestExpiryHours * 60 * 60_000;
+  }
+
   async function submitRequest(input: SubmitInput) {
     const guestTimezone = validateTimezone(input.guestTimezone);
     const durationMinutes = validateDuration(input.durationMinutes);
@@ -308,49 +381,39 @@ export function createSchedulingService(deps: SchedulingServiceDeps) {
       `${durationMinutes} min, ${formatMoment(startMs, ownerTimezone)} (${formatMoment(startMs, guestTimezone)} for them).`,
       `Email ${email}, unverified. Reply yes or no to this message.`,
     ].join("\n");
-    const spaces = await ownerSpaces();
-    if (spaces.length === 0) {
-      console.warn("A scheduling request arrived but no verified owner chat exists to approve it.", { code: request.code });
-    }
-    for (const spaceId of spaces) {
-      await deps.send(spaceId, ownerText).catch((error) => {
-        console.error("Unable to deliver a scheduling request to the owner:", { code: request.code, message: error instanceof Error ? error.message : String(error) });
-      });
+    const delivered = await notifyOwners(ownerText);
+    if (delivered === 0) {
+      // Never tell a guest something was sent when nobody received it.
+      const outcome = `Could not reach ${ownerName}. Nothing was sent.`;
+      console.error("A scheduling request could not reach any owner chat.", { code: request.code });
+      await updateRequest(request.code, { status: "failed", resolvedAt: new Date(now()).toISOString(), outcome });
+      return {
+        request: { ...request, status: "failed" as const, outcome },
+        delivered: false,
+        guestText: `I couldn't reach ${ownerName} to pass this on, so nothing was sent. Try again later.`,
+      };
     }
     return {
       request,
+      delivered: true,
       guestText: `Sent to ${ownerName}: ${formatMoment(startMs, guestTimezone)}, ${durationMinutes} min, "${purpose}", invite to ${email}. The slot isn't held until they approve. Request ${request.code}.`,
     };
   }
 
-  async function updateRequest(code: string, patch: Partial<SchedulingRequest>): Promise<SchedulingRequest | undefined> {
-    return requestStore.update<SchedulingRequest | undefined>((state) => {
-      const request = state.requests.find((candidate) => candidate.code === code);
-      if (!request) return { result: undefined, changed: false };
-      Object.assign(request, patch);
-      return { result: request, changed: true };
-    });
-  }
-
-  async function notifyGuest(request: SchedulingRequest, text: string): Promise<void> {
-    await deps.send(request.guestSpaceId, text).catch((error) => {
-      console.error("Unable to notify the guest:", { code: request.code, message: error instanceof Error ? error.message : String(error) });
-    });
-  }
-
-  function expiryMs(request: SchedulingRequest): number {
-    return Date.parse(request.createdAt) + scheduling.requestExpiryHours * 60 * 60_000;
-  }
-
-  /** Approve a pending request: recheck the slot, create the event, verify it, then tell both people. */
+  /** Approve a pending request: claim it, recheck the slot, create the event, verify every field, then tell both people. */
   async function approve(code: string): Promise<string> {
-    const request = (await requestStore.read()).requests.find((candidate) => candidate.code === code);
-    if (!request) return `I don't have a request ${code}.`;
-    if (request.status !== "pending") return `Request ${code} is already ${request.status}.`;
-    if (expiryMs(request) <= now()) {
-      const expired = await expire(request);
+    const existing = (await requestStore.read()).requests.find((candidate) => candidate.code === code);
+    if (!existing) return `I don't have a request ${code}.`;
+    if (existing.status === "pending" && expiryMs(existing) <= now()) {
+      const expired = await expire(existing);
       return `Request ${code} expired before you replied. ${expired.guestName} has been told.`;
     }
+    const claim = await claimTransition(code, "pending", "approving");
+    if (!claim.claimed) {
+      const status = claim.request?.status ?? "missing";
+      return status === "approving" ? `Request ${code} is being booked right now.` : `Request ${code} is already ${status}.`;
+    }
+    const request = claim.request;
     const startMs = Date.parse(request.startIso);
     const endMs = Date.parse(request.endIso);
     const zones = await calendarZones(deps.calendar, ownerTimezone);
@@ -379,34 +442,43 @@ export function createSchedulingService(deps: SchedulingServiceDeps) {
       return `${outcome} ${request.guestName} has been told.`;
     }
     const verified = created.id ? await deps.calendar.getEvent(created.id) : undefined;
-    if (!verified || verified.status === "cancelled") {
+    if (!verified) {
       const outcome = "Google accepted the event but I could not read it back, so I am not treating it as booked.";
       await updateRequest(code, { status: "failed", resolvedAt: new Date(now()).toISOString(), outcome, eventId: created.id ?? undefined });
       await notifyGuest(request, `Something went wrong while booking. ${ownerName} will follow up.`);
       return `${outcome} Check your calendar for "Call with ${request.guestName}".`;
     }
+    const mismatches = bookingMismatches(verified, request);
+    if (mismatches.length) {
+      const outcome = `Google created the event but it does not match the request (${mismatches.join(", ")}). Check "Call with ${request.guestName}" in your calendar.`;
+      await updateRequest(code, { status: "failed", resolvedAt: new Date(now()).toISOString(), outcome, eventId: verified.id ?? undefined });
+      await notifyGuest(request, `Something went wrong while booking. ${ownerName} will follow up.`);
+      return outcome;
+    }
     const meetLink = meetLinkOf(verified);
-    const outcome = `Booked and invitation sent to ${request.email}.${meetLink ? " Meet link is on the event." : ""}`;
+    const linkNote = scheduling.meetLink && !meetLink ? " Google did not attach a Meet link; add one from the calendar." : meetLink ? " Meet link is on the event." : "";
+    const outcome = `Booked and invitation sent to ${request.email}.${linkNote}`;
     await updateRequest(code, { status: "booked", resolvedAt: new Date(now()).toISOString(), outcome, eventId: verified.id ?? undefined, meetLink });
     await notifyGuest(request, `Confirmed for ${formatMoment(startMs, request.guestTimezone)}. Invite sent to ${request.email}.${meetLink ? ` Meet link: ${meetLink}` : ""} Text me if you need to cancel.`);
     return outcome;
   }
 
   async function decline(code: string): Promise<string> {
-    const request = (await requestStore.read()).requests.find((candidate) => candidate.code === code);
-    if (!request) return `I don't have a request ${code}.`;
-    if (request.status !== "pending") return `Request ${code} is already ${request.status}.`;
+    const claim = await claimTransition(code, "pending", "declined");
+    if (!claim.claimed) return claim.request ? `Request ${code} is already ${claim.request.status}.` : `I don't have a request ${code}.`;
     const outcome = `${ownerName} can't make that time.`;
-    await updateRequest(code, { status: "declined", resolvedAt: new Date(now()).toISOString(), outcome });
-    await notifyGuest(request, `${outcome} Ask me for their availability again if you'd like another time.`);
-    return `Declined. ${request.guestName} has been told. Nothing was created.`;
+    await updateRequest(code, { resolvedAt: new Date(now()).toISOString(), outcome });
+    await notifyGuest(claim.request, `${outcome} Ask me for their availability again if you'd like another time.`);
+    return `Declined. ${claim.request.guestName} has been told. Nothing was created.`;
   }
 
   async function expire(request: SchedulingRequest): Promise<SchedulingRequest> {
+    const claim = await claimTransition(request.code, "pending", "expired");
+    if (!claim.claimed) return claim.request ?? request;
     const outcome = `Your request expired before ${ownerName} approved it.`;
-    const updated = await updateRequest(request.code, { status: "expired", resolvedAt: new Date(now()).toISOString(), outcome });
+    await updateRequest(request.code, { resolvedAt: new Date(now()).toISOString(), outcome });
     await notifyGuest(request, `${outcome} Ask me for availability again to send a new one.`);
-    return updated ?? request;
+    return { ...claim.request, outcome };
   }
 
   async function expirePending(): Promise<void> {
@@ -414,11 +486,36 @@ export function createSchedulingService(deps: SchedulingServiceDeps) {
     for (const request of due) await expire(request);
   }
 
-  function startExpiryPoller(intervalMs = 60_000): () => void {
-    return startPoller("Scheduling expiry", intervalMs, expirePending);
+  /** A transition left behind by a crash: settle it from what the calendar actually holds. */
+  async function recoverStale(): Promise<void> {
+    const stale = (await requestStore.read()).requests.filter((request) =>
+      (request.status === "approving" || request.status === "cancelling")
+      && now() - Date.parse(request.transitionAt ?? request.createdAt) > STALE_TRANSITION_MS);
+    for (const request of stale) {
+      if (request.status === "approving") {
+        const outcome = `Approval was interrupted by a restart. Check your calendar for "Call with ${request.guestName}" before approving again.`;
+        await updateRequest(request.code, { status: "failed", resolvedAt: new Date(now()).toISOString(), outcome });
+        await notifyOwners(`Request ${request.code}: ${outcome}`);
+        await notifyGuest(request, `Something went wrong while booking. ${ownerName} will follow up.`);
+        continue;
+      }
+      const remaining = request.eventId ? await deps.calendar.getEvent(request.eventId) : undefined;
+      if (remaining && remaining.status !== "cancelled") {
+        await updateRequest(request.code, { status: "booked", transitionAt: undefined });
+      } else {
+        await updateRequest(request.code, { status: "cancelled", resolvedAt: new Date(now()).toISOString(), outcome: "Cancelled. The invitation has been withdrawn." });
+      }
+    }
   }
 
-  /** Cancel the guest's own booking, remove the event, verify it is gone, and tell the owner. */
+  function startExpiryPoller(intervalMs = 60_000): () => void {
+    return startPoller("Scheduling expiry", intervalMs, async () => {
+      await recoverStale();
+      await expirePending();
+    });
+  }
+
+  /** Cancel the guest's own booking: claim it, remove the event, verify it is gone, and tell the owner. */
   async function cancelGuestBooking(guestSenderId: string, code?: string): Promise<string> {
     const candidates = (await requestStore.read()).requests
       .filter((request) => request.guestSenderId === guestSenderId && (request.status === "booked" || request.status === "pending"))
@@ -427,25 +524,31 @@ export function createSchedulingService(deps: SchedulingServiceDeps) {
     const request = candidates[0];
     if (!request) return code ? `I don't have an active request ${code} for you.` : "You have no booking or pending request to cancel.";
     if (request.status === "pending") {
-      await updateRequest(request.code, { status: "cancelled", resolvedAt: new Date(now()).toISOString(), outcome: "Cancelled by the guest before approval." });
-      for (const spaceId of await ownerSpaces()) await deps.send(spaceId, `Request ${request.code} from ${request.guestName} was withdrawn.`).catch(() => undefined);
+      const claim = await claimTransition(request.code, "pending", "cancelled");
+      if (!claim.claimed) return `Request ${request.code} is already ${claim.request?.status ?? "gone"}.`;
+      await updateRequest(request.code, { resolvedAt: new Date(now()).toISOString(), outcome: "Cancelled by the guest before approval." });
+      await notifyOwners(`Request ${request.code} from ${request.guestName} was withdrawn.`);
       return `Cancelled request ${request.code}. ${ownerName} has been told.`;
     }
     if (!request.eventId) return "That booking has no calendar event to remove. Contact the owner directly.";
+    const claim = await claimTransition(request.code, "booked", "cancelling");
+    if (!claim.claimed) return `Booking ${request.code} is already ${claim.request?.status ?? "gone"}.`;
     try {
       await deps.calendar.deleteEvent(request.eventId, "all");
     } catch (error) {
       console.error("Guest cancellation failed:", { code: request.code, message: error instanceof Error ? error.message : String(error) });
+      await updateRequest(request.code, { status: "booked", transitionAt: undefined });
       return "Google rejected the cancellation. Nothing was changed. Try again in a moment.";
     }
     const remaining = await deps.calendar.getEvent(request.eventId);
-    if (remaining && remaining.status !== "cancelled") return "I asked Google to cancel but the event is still there. Nothing else was changed. Try again in a moment.";
+    if (remaining && remaining.status !== "cancelled") {
+      await updateRequest(request.code, { status: "booked", transitionAt: undefined });
+      return "I asked Google to cancel but the event is still there. Nothing else was changed. Try again in a moment.";
+    }
     const outcome = "Cancelled. The invitation has been withdrawn.";
     await updateRequest(request.code, { status: "cancelled", resolvedAt: new Date(now()).toISOString(), outcome });
     const when = formatMoment(Date.parse(request.startIso), ownerTimezone);
-    for (const spaceId of await ownerSpaces()) {
-      await deps.send(spaceId, `${request.guestName} cancelled ${when} (${request.code}). The event has been removed.`).catch(() => undefined);
-    }
+    await notifyOwners(`${request.guestName} cancelled ${when} (${request.code}). The event has been removed.`);
     return `${outcome} ${ownerName} has been told.`;
   }
 
@@ -474,7 +577,7 @@ export function createSchedulingService(deps: SchedulingServiceDeps) {
     return `Which request? Reply to the request message, or include its code: ${pending.map((request) => `${request.code} (${request.guestName})`).join(", ")}.`;
   }
 
-  return { availability, submitRequest, approve, decline, cancelGuestBooking, requestsFor, resolveOwnerReply, expirePending, startExpiryPoller };
+  return { availability, submitRequest, approve, decline, cancelGuestBooking, requestsFor, resolveOwnerReply, expirePending, recoverStale, startExpiryPoller };
 }
 
 export type SchedulingService = ReturnType<typeof createSchedulingService>;

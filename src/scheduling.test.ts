@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "spectrum-ts";
 import type { CalendarEventData, CalendarPort } from "./capabilities/calendar.js";
-import { bookableRange, createSchedulingService, freeWindows, requestStore, zonedTimestamp } from "./scheduling.js";
+import { STALE_TRANSITION_MS, bookableRange, bookingMismatches, createSchedulingService, freeWindows, requestStore, zonedTimestamp } from "./scheduling.js";
 import { defaultSchedulingSettings } from "./scheduling-settings.js";
 
 let directory: string;
@@ -39,6 +39,8 @@ function fakeCalendar(initial: CalendarEventData[] = []): FakeCalendar {
     async insertEvent(body, sendUpdates, options) {
       inserts.push({ body, sendUpdates, options });
       const event: CalendarEventData = { id: `evt-${inserts.length}`, ...body, hangoutLink: options?.conferenceDataVersion ? "https://meet.google.com/abc-defg-hij" : undefined } as CalendarEventData;
+      if (body.start && typeof body.start === "object") event.start = { dateTime: new Date(String((body.start as { dateTime: string }).dateTime)).toISOString() };
+      if (body.end && typeof body.end === "object") event.end = { dateTime: new Date(String((body.end as { dateTime: string }).dateTime)).toISOString() };
       events.set(event.id!, event);
       return event;
     },
@@ -221,5 +223,110 @@ describe("request lifecycle", () => {
     expect(request.guestName).toBe("Sam <b>");
     expect(request.purpose.length).toBeLessThanOrEqual(200);
     expect(request.purpose).not.toContain("\n");
+  });
+
+  it("never tells the guest a request was sent when no owner chat received it", async () => {
+    const calendar = fakeCalendar();
+    const { service: scheduling } = service(calendar, { ownerSpaces: async () => [] });
+    const result = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
+    expect(result.delivered).toBe(false);
+    expect(result.guestText).toContain("nothing was sent");
+    expect(result.guestText).not.toContain("Sent to");
+    expect((await requestStore.read()).requests[0]).toMatchObject({ status: "failed" });
+
+    const failingSend = vi.fn(async () => { throw new Error("space unavailable"); });
+    const { service: broken } = service(calendar, { send: failingSend });
+    const second = await broken.submitRequest({ ...guest, startIso: "2026-09-02T14:00:00Z" });
+    expect(second.delivered).toBe(false);
+  });
+
+  it("lets only one caller book a request when two approvals race", async () => {
+    const calendar = fakeCalendar();
+    let releaseInsert!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseInsert = resolve; });
+    const insert = calendar.insertEvent.bind(calendar);
+    calendar.insertEvent = async (body, sendUpdates, options) => { await gate; return insert(body, sendUpdates, options); };
+    const { service: scheduling } = service(calendar);
+    const { request } = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
+    const first = scheduling.approve(request.code);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = await scheduling.approve(request.code);
+    expect(second).toContain("being booked right now");
+    releaseInsert();
+    expect(await first).toContain("Booked");
+    expect(calendar.inserts).toHaveLength(1);
+  });
+
+  it("refuses a cancellation while a booking is mid-flight and recovers a stale transition", async () => {
+    const calendar = fakeCalendar();
+    let now = NOW;
+    const { service: scheduling, send } = service(calendar, { now: () => now });
+    const { request } = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
+    await requestStore.update((state) => {
+      state.requests[0]!.status = "approving";
+      state.requests[0]!.transitionAt = new Date(now).toISOString();
+      return { result: undefined, changed: true };
+    });
+    expect(await scheduling.cancelGuestBooking(guest.guestSenderId)).toContain("no booking");
+    expect(await scheduling.approve(request.code)).toContain("being booked right now");
+
+    now = NOW + STALE_TRANSITION_MS + 1;
+    await scheduling.recoverStale();
+    expect((await requestStore.read()).requests[0]).toMatchObject({ status: "failed" });
+    expect(send.mock.calls.at(-2)?.[1]).toContain("interrupted");
+  });
+
+  it("settles a stale cancellation from what the calendar actually holds", async () => {
+    const calendar = fakeCalendar();
+    let now = NOW;
+    const { service: scheduling } = service(calendar, { now: () => now });
+    const { request } = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
+    await scheduling.approve(request.code);
+    await requestStore.update((state) => {
+      state.requests[0]!.status = "cancelling";
+      state.requests[0]!.transitionAt = new Date(now).toISOString();
+      return { result: undefined, changed: true };
+    });
+    now = NOW + STALE_TRANSITION_MS + 1;
+    await scheduling.recoverStale();
+    expect((await requestStore.read()).requests[0]?.status).toBe("booked");
+    calendar.events.delete("evt-1");
+    await requestStore.update((state) => { state.requests[0]!.status = "cancelling"; return { result: undefined, changed: true }; });
+    await scheduling.recoverStale();
+    expect((await requestStore.read()).requests[0]?.status).toBe("cancelled");
+  });
+
+  it("verifies the read-back event against the request and reports a missing Meet link visibly", async () => {
+    const request = { startIso: "2026-09-02T13:00:00.000Z", endIso: "2026-09-02T13:30:00.000Z", email: "sam@example.com" };
+    expect(bookingMismatches({ id: "e", start: { dateTime: "2026-09-02T14:00:00+01:00" }, end: { dateTime: "2026-09-02T14:30:00+01:00" }, attendees: [{ email: "SAM@example.com" }] }, request)).toEqual([]);
+    expect(bookingMismatches({ id: "e", start: { dateTime: "2026-09-02T15:00:00Z" }, end: { dateTime: "2026-09-02T13:30:00Z" }, attendees: [] }, request)).toEqual(["start time", "guest attendee"]);
+
+    const calendar = fakeCalendar();
+    const insert = calendar.insertEvent.bind(calendar);
+    calendar.insertEvent = async (body, sendUpdates) => insert(body, sendUpdates, { conferenceDataVersion: 0 });
+    const { service: scheduling } = service(calendar);
+    const { request: submitted } = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
+    const outcome = await scheduling.approve(submitted.code);
+    expect(outcome).toContain("Booked and invitation sent");
+    expect(outcome).toContain("did not attach a Meet link");
+    const stored = (await requestStore.read()).requests[0]!;
+    expect(stored.status).toBe("booked");
+    expect(stored.meetLink).toBeUndefined();
+  });
+
+  it("does not report a booking whose event came back at the wrong time", async () => {
+    const calendar = fakeCalendar();
+    const insert = calendar.insertEvent.bind(calendar);
+    calendar.insertEvent = async (body, sendUpdates, options) => {
+      const event = await insert(body, sendUpdates, options);
+      calendar.events.set(event.id!, { ...event, start: { dateTime: "2026-09-02T16:00:00Z" } });
+      return event;
+    };
+    const { service: scheduling, send } = service(calendar);
+    const { request } = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
+    const outcome = await scheduling.approve(request.code);
+    expect(outcome).toContain("does not match the request (start time)");
+    expect((await requestStore.read()).requests[0]).toMatchObject({ status: "failed", eventId: "evt-1" });
+    expect(send.mock.calls.at(-1)?.[1]).toContain("Something went wrong");
   });
 });

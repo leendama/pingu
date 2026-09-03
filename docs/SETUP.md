@@ -121,7 +121,7 @@ or a platform that terminates TLS for you (Fly.io, Railway, a home server behind
 
 ## Guest limits and cost
 
-Anyone can text the number. The defaults in `.env.example` cap each unknown sender at 20 messages a day, all guests together at 300,000 model tokens a day, and each guest at 5 reminders and 1 pending meeting request. When a cap is hit, guests are told to try tomorrow; the owner is never limited. Set `PINGU_GUEST_DAILY_TOKEN_BUDGET` from your provider's per-token price to the daily spend you accept.
+Anyone can text the number. The defaults in `.env.example` cap each unknown sender at 20 messages a day (every message in a burst counts), all guests together at 300,000 model tokens a day, and each guest at 5 reminders across all chats and 1 pending meeting request. Before a guest turn runs, Pingu reserves `PINGU_GUEST_MAX_TURN_TOKENS` against the day's budget, counts every model response as it happens (including turns that fail), and refuses texts longer than `PINGU_GUEST_MAX_INBOUND_CHARS`. When a cap is hit, guests are told to try tomorrow; the owner is never limited. Set `PINGU_GUEST_DAILY_TOKEN_BUDGET` from your provider's per-token price to the daily spend you accept.
 
 Bookable hours (`PINGU_BOOKABLE_HOURS`, `PINGU_BOOKABLE_DAYS`) decide what guests can see. A 24-hour window reveals when you sleep; keep it to the hours you would tell a stranger.
 
@@ -150,7 +150,9 @@ Read the CHANGELOG entry first; a release notes any change to the data files. Th
 
 - Ask Pingu to forget the current chat.
 - `npm run reset-data -- --yes` or the **Delete all Pingu data** button on the setup page removes transcripts, reminders, alerts, drafts, guest records, verified owners, and booking requests. Credentials are kept.
-- Remove `PHOTON_DATA_DIR` entirely to drop credentials too.
+- **Hosted (wizard):** remove `PHOTON_DATA_DIR` or the `pingu-data` volume to drop the encrypted credentials too.
+- **Local (.env):** the data directory holds only the Google token. Delete `.env` and `credentials.json` yourself to remove the rest.
+- Ids in `PINGU_OWNER_SENDER_IDS` stay owners after any reset until you remove them from the environment.
 
 ## Connect Granola
 

@@ -1,6 +1,6 @@
 import { armPendingAction } from "../pending-confirmations.js";
 import type { PinguPlugin } from "../plugins.js";
-import { capabilityPlugin, cleanHeader, stringArray, stringValue, type JsonObject, type ToolRunContext } from "../tools.js";
+import { capabilityPlugin, cleanHeader, stringArray, stringValue, type JsonObject } from "../tools.js";
 
 /** Attendees other than the owner; deleting such an event emails them a cancellation. */
 export function otherAttendeeCount(event: CalendarEventData): number {
@@ -10,16 +10,44 @@ export function otherAttendeeCount(event: CalendarEventData): number {
 
 /**
  * Why a delete needs the owner's yes, or undefined when one personal event can
- * go in one step. Anything read from email or notes this turn forces a yes too:
- * third-party content never authorises a deletion.
+ * go in one step. (A turn that read third-party content cannot delete at all;
+ * the registry blocks every side-effecting tool there.)
  */
-export function deleteConfirmationReason(event: CalendarEventData, context: Pick<ToolRunContext, "untrustedContentSeen">): string | undefined {
+export function deleteConfirmationReason(event: CalendarEventData): string | undefined {
   const reasons: string[] = [];
   if (event.recurringEventId) reasons.push("it is part of a recurring series");
   const attendees = otherAttendeeCount(event);
   if (attendees > 0) reasons.push(`${attendees} attendee${attendees === 1 ? "" : "s"} would receive a cancellation email`);
-  if (context.untrustedContentSeen) reasons.push("this turn read content written by someone else");
   return reasons.length ? reasons.join(" and ") : undefined;
+}
+
+interface ExpectedEventFields {
+  summary?: string;
+  start?: CalendarTime;
+  end?: CalendarTime;
+  description?: string;
+  location?: string;
+  attendees?: string[];
+  colorId?: string;
+}
+
+/** Every requested field the read-back event fails to match. A write is verified only when this is empty. */
+export function eventMismatches(event: CalendarEventData, expected: ExpectedEventFields, zones: CalendarZones): string[] {
+  const mismatches: string[] = [];
+  if (expected.summary !== undefined && (event.summary ?? "") !== expected.summary) mismatches.push("title");
+  if (expected.start && !sameCalendarTime(event.start, expected.start, zones)) mismatches.push("start time");
+  if (expected.end && !sameCalendarTime(event.end, expected.end, zones)) mismatches.push("end time");
+  if (expected.description !== undefined && (event.description ?? "") !== expected.description) mismatches.push("description");
+  if (expected.location !== undefined && (event.location ?? "") !== expected.location) mismatches.push("location");
+  if (expected.colorId !== undefined && (event.colorId ?? "") !== expected.colorId) mismatches.push("colour");
+  if (expected.attendees) {
+    const actual = new Set((Array.isArray(event.attendees) ? event.attendees as Array<{ email?: string | null; self?: boolean }> : [])
+      .filter((attendee) => attendee && !attendee.self)
+      .map((attendee) => attendee.email?.toLowerCase() ?? ""));
+    const missing = expected.attendees.filter((email) => !actual.has(email.toLowerCase()));
+    if (missing.length) mismatches.push(`attendees (${missing.join(", ")})`);
+  }
+  return mismatches;
 }
 
 /** Google reports a deleted event as missing or as status "cancelled". */
@@ -427,7 +455,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           const event = await port.getEvent(eventId);
           if (!event) throw new Error(`Calendar event ${eventId} was not found. Nothing was changed.`);
           const key = `delete_event:${eventId}`;
-          const reason = deleteConfirmationReason(event, context);
+          const reason = deleteConfirmationReason(event);
           if (reason && context.confirmedActionKey !== key) {
             await armPendingAction(context.spaceId, key, `Delete "${event.summary ?? eventId}"`);
             return {
@@ -616,6 +644,12 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           );
           const event = created.id ? await port.getEvent(created.id) : undefined;
           if (!event) throw new Error("Google accepted the event but it could not be read back. Check the calendar before trying again.");
+          const mismatches = eventMismatches(event, {
+            summary: title, start: startValue, end: endValue,
+            description: stringValue(args.description), location: stringValue(args.location),
+            attendees: attendees.map((attendee) => attendee.email),
+          }, zones);
+          if (mismatches.length) throw new Error(`Google created event ${event.id} but it does not match the request (${mismatches.join(", ")}). Check the calendar before trying again.`);
           return {
             output: JSON.stringify({
               created: true,
@@ -669,9 +703,13 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           }
 
           const requestBody: JsonObject = {};
-          if (typeof args.title === "string") requestBody.summary = args.title;
+          const expected: ExpectedEventFields = {};
+          const zones = await calendarZones(port, timezone);
+          if (typeof args.title === "string") {
+            requestBody.summary = args.title;
+            expected.summary = args.title;
+          }
           if (newStart && newEnd) {
-            const zones = await calendarZones(port, timezone);
             const { startValue, endValue, startMs, endMs } = eventWindow(newStart, newEnd, zones);
             if (!startValue.date) {
               const conflict = await busyConflict(port, [{ startMs, endMs }], new Set([eventId]), zones);
@@ -679,19 +717,27 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
             }
             requestBody.start = startValue;
             requestBody.end = endValue;
+            expected.start = startValue;
+            expected.end = endValue;
           }
           if (args.clear_description === true) requestBody.description = "";
           else if (typeof args.description === "string") requestBody.description = args.description;
+          if (typeof requestBody.description === "string") expected.description = requestBody.description;
           if (args.clear_location === true) requestBody.location = "";
           else if (typeof args.location === "string") requestBody.location = args.location;
+          if (typeof requestBody.location === "string") expected.location = requestBody.location;
           if (Array.isArray(args.attendees)) {
-            requestBody.attendees = stringArray(args.attendees).map((email) => ({ email: cleanHeader(email) }));
+            const emails = stringArray(args.attendees).map((email) => cleanHeader(email));
+            requestBody.attendees = emails.map((email) => ({ email }));
+            expected.attendees = emails;
           }
           if (Object.keys(requestBody).length === 0) throw new Error("No event changes were provided.");
 
           await port.patchEvent(eventId, requestBody, "all");
           const event = await port.getEvent(eventId);
           if (!event) throw new Error(`Google accepted the edit but event ${eventId} could not be read back. Check the calendar before trying again.`);
+          const mismatches = eventMismatches(event, expected, zones);
+          if (mismatches.length) throw new Error(`Google accepted the edit but event ${eventId} does not match the request (${mismatches.join(", ")}). Check the calendar before trying again.`);
           return {
             output: JSON.stringify({
               edited: true,

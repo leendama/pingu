@@ -21,7 +21,11 @@ interface OwnersState {
   version: 1;
   owners: OwnerRecord[];
   claim?: ClaimCode;
+  /** Claim attempts per sender per UTC day, so a stranger cannot generate unlimited model-free replies. */
+  attempts?: Record<string, { day: string; count: number }>;
 }
+
+export const CLAIM_ATTEMPTS_PER_DAY = 5;
 
 const store = new JsonFileStore<OwnersState>(
   "owners.json",
@@ -34,6 +38,7 @@ const store = new JsonFileStore<OwnersState>(
         ? record.owners.filter((owner): owner is OwnerRecord => Boolean(owner && typeof owner === "object" && typeof owner.senderId === "string"))
         : [],
       claim: record.claim && typeof record.claim === "object" && typeof record.claim.code === "string" ? record.claim : undefined,
+      attempts: record.attempts && typeof record.attempts === "object" ? record.attempts : {},
     };
   },
 );
@@ -76,7 +81,7 @@ export async function activeClaimCode(now = Date.now()): Promise<ClaimCode | und
   return claim && Date.parse(claim.expiresAt) > now ? claim : undefined;
 }
 
-export type ClaimOutcome = "verified" | "expired" | "no-match";
+export type ClaimOutcome = "verified" | "expired" | "no-match" | "rate-limited";
 
 /**
  * Redeem a claim code texted to Pingu. The sender id is recorded exactly as
@@ -91,8 +96,14 @@ export async function redeemClaimCode(
   if (!looksLikeClaimCode(text)) return undefined;
   const supplied = normaliseClaimText(text);
   return store.update<ClaimOutcome>((state) => {
+    const day = new Date(now).toISOString().slice(0, 10);
+    state.attempts ??= {};
+    const attempts = state.attempts[sender.senderId]?.day === day ? state.attempts[sender.senderId]! : { day, count: 0 };
+    if (attempts.count >= CLAIM_ATTEMPTS_PER_DAY) return { result: "rate-limited", changed: false };
+    attempts.count += 1;
+    state.attempts[sender.senderId] = attempts;
     const claim = state.claim;
-    if (!claim || normaliseClaimText(claim.code) !== supplied) return { result: "no-match", changed: false };
+    if (!claim || normaliseClaimText(claim.code) !== supplied) return { result: "no-match", changed: true };
     if (Date.parse(claim.expiresAt) <= now) {
       state.claim = undefined;
       return { result: "expired", changed: true };
@@ -116,6 +127,26 @@ function environmentOwnerIds(): string[] {
 
 export async function listOwners(): Promise<OwnerRecord[]> {
   return (await store.read()).owners;
+}
+
+/**
+ * Remember the direct-message chat a verified owner writes from, so approvals
+ * and notices reach them. Owners allowed only through the environment have no
+ * saved chat until they message Pingu once.
+ */
+export async function recordOwnerSpace(senderId: string, spaceId: string, now = Date.now()): Promise<void> {
+  const fromEnvironment = environmentOwnerIds().includes(senderId);
+  await store.update((state) => {
+    const existing = state.owners.find((owner) => owner.senderId === senderId);
+    if (existing) {
+      if (existing.spaceId === spaceId) return { result: undefined, changed: false };
+      existing.spaceId = spaceId;
+      return { result: undefined, changed: true };
+    }
+    if (!fromEnvironment) return { result: undefined, changed: false };
+    state.owners.push({ senderId, spaceId, label: "environment", verifiedAt: new Date(now).toISOString() });
+    return { result: undefined, changed: true };
+  });
 }
 
 export async function removeOwner(senderId: string): Promise<boolean> {

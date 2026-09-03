@@ -20,6 +20,10 @@ export interface ToolDeclaration {
   sideEffecting?: boolean;
   /** Only offered to guests, never to the owner. Defaults to false. */
   guestOnly?: boolean;
+  /** Only the verified owner may call it, in any chat. Independent of `private`. Defaults to false. */
+  ownerOnly?: boolean;
+  /** May still run after third-party content was read this turn, because it changes nothing outside review. Defaults to false. */
+  safeAfterUntrusted?: boolean;
   /** Only offered in direct messages, never in groups. Defaults to false. */
   directOnly?: boolean;
   /** Only meaningful inside a group chat; rejected elsewhere. Defaults to false. */
@@ -42,6 +46,8 @@ export function capabilityPlugin(
     sideEffectingTools: names((declaration) => declaration.sideEffecting !== false),
     privateTools: names((declaration) => declaration.private !== false),
     guestOnlyTools: names((declaration) => declaration.guestOnly === true),
+    ownerOnlyTools: names((declaration) => declaration.ownerOnly === true),
+    safeAfterUntrustedTools: names((declaration) => declaration.safeAfterUntrusted === true),
     directOnlyTools: names((declaration) => declaration.directOnly === true),
     groupOnlyTools: names((declaration) => declaration.groupOnly === true),
     untrustedSourceTools: names((declaration) => declaration.untrustedSource === true),

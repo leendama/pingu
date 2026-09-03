@@ -108,6 +108,9 @@ export function settingsFromEnvironment(): RuntimeSettings {
       dailyMessageCap: envNumber("PINGU_GUEST_DAILY_MESSAGE_CAP", defaultGuestSettings.dailyMessageCap, { min: 1, max: 500 }),
       dailyTokenBudget: envNumber("PINGU_GUEST_DAILY_TOKEN_BUDGET", defaultGuestSettings.dailyTokenBudget, { min: 1000, max: 100_000_000 }),
       maxReminders: envNumber("PINGU_GUEST_MAX_REMINDERS", defaultGuestSettings.maxReminders, { min: 0, max: 100 }),
+      maxInboundChars: envNumber("PINGU_GUEST_MAX_INBOUND_CHARS", defaultGuestSettings.maxInboundChars, { min: 100, max: 50_000 }),
+      maxTurnTokens: envNumber("PINGU_GUEST_MAX_TURN_TOKENS", defaultGuestSettings.maxTurnTokens, { min: 1000, max: 1_000_000 }),
+      maxToolRounds: envNumber("PINGU_GUEST_MAX_TOOL_ROUNDS", defaultGuestSettings.maxToolRounds, { min: 0, max: 10 }),
     },
     transcripts: {
       ...defaultTranscriptSettings,

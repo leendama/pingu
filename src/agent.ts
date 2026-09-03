@@ -4,9 +4,9 @@ import { markdown, Spectrum } from "spectrum-ts";
 import type { Message, Space } from "spectrum-ts";
 import { builtInPlugins } from "./builtin-plugin.js";
 import { loadCommunityPlugins } from "./community-plugins.js";
-import { admitGuestMessage, firstContactDisclosure, recordGuestUsage } from "./guests.js";
+import { admitGuestMessage, firstContactDisclosure, recordGuestUsage, releaseGuestReservation } from "./guests.js";
 import { createMessageProcessor, inboundMessageText } from "./message-pipeline.js";
-import { redeemClaimCode, resolveSenderRole } from "./owners.js";
+import { recordOwnerSpace, redeemClaimCode, resolveSenderRole } from "./owners.js";
 import { consumeActionConfirmation } from "./pending-confirmations.js";
 import { consumePendingEmailConfirmation, getPendingEmail, markPendingEmailReviewed } from "./pending-emails.js";
 import { emailAlertStore, startEmailAlertScheduler } from "./email-alerts.js";
@@ -20,7 +20,7 @@ import type { RuntimeSettings } from "./runtime-settings.js";
 import { createSchedulingService } from "./scheduling.js";
 import { dataPath } from "./state.js";
 import { KeyedBatchQueue } from "./task-queue.js";
-import { appendTranscript, forgetTranscript, readTranscript } from "./transcripts.js";
+import { appendTranscript, forgetTranscript, readTranscript, startTranscriptCleanup } from "./transcripts.js";
 
 export function agentInstructions(settings: RuntimeSettings, pluginInstructions: string[]): string {
   return [
@@ -134,6 +134,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       forget: forgetTranscript,
     },
     keepReasoning: kind === "openai",
+    maxToolRounds: (context) => context.role === "guest" ? settings.guest.maxToolRounds : 6,
     runTool: (name, argumentsJson, context) => registry.run(name, argumentsJson, context),
     onUsage: (usage, context) => context.role === "guest" ? recordGuestUsage(usage.totalTokens) : undefined,
   });
@@ -155,6 +156,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     },
   );
   const stopScheduling = scheduling.startExpiryPoller();
+  const stopTranscriptCleanup = startTranscriptCleanup(settings.transcripts);
 
   const processMessage = createMessageProcessor({
     assistantName: settings.assistantName,
@@ -167,8 +169,11 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     markEmailReviewed: markPendingEmailReviewed,
     resolveRole: resolveSenderRole,
     redeemClaim: (text, sender) => redeemClaimCode(text, sender),
-    admitGuest: (senderId) => admitGuestMessage(senderId, settings.guest),
+    admitGuest: (senderId, messageCount) => admitGuestMessage(senderId, settings.guest, { messages: messageCount, reserveTokens: settings.guest.maxTurnTokens }),
+    releaseGuest: () => releaseGuestReservation(settings.guest.maxTurnTokens),
+    guestMaxInboundChars: settings.guest.maxInboundChars,
     guestDisclosure: firstContactDisclosure(settings.assistantName, settings.ownerName),
+    recordOwnerSpace,
     resolveOwnerReply: (input) => scheduling.resolveOwnerReply(input),
     onReplyDelivered: markReplyDelivered,
     synthesizeVoice: async (text) => {
@@ -205,6 +210,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       stopReminders();
       stopEmailAlerts();
       stopScheduling();
+      stopTranscriptCleanup();
       await messageQueue.drain();
     }
   })();
@@ -216,6 +222,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       stopReminders();
       stopEmailAlerts();
       stopScheduling();
+      stopTranscriptCleanup();
       await app.stop();
       await done;
     },

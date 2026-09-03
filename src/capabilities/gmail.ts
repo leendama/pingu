@@ -227,6 +227,7 @@ export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): 
             additionalProperties: false,
           },
         },
+        safeAfterUntrusted: true,
         run: async (args, context) => {
           if (stringArray(args.to).length === 0) throw new Error("At least one recipient is required.");
           const body = appendPinguSignature(typeof args.body === "string" ? args.body : "");

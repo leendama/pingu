@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  CLAIM_CODE_TTL_MS, activeClaimCode, generateClaimCode, hasVerifiedOwner, isOwnerSender, issueClaimCode,
-  listOwners, looksLikeClaimCode, normaliseClaimText, ownerSpaceIds, redeemClaimCode, removeOwner, resolveSenderRole,
+  CLAIM_ATTEMPTS_PER_DAY, CLAIM_CODE_TTL_MS, activeClaimCode, generateClaimCode, hasVerifiedOwner, isOwnerSender, issueClaimCode,
+  listOwners, looksLikeClaimCode, normaliseClaimText, ownerSpaceIds, recordOwnerSpace, redeemClaimCode, removeOwner, resolveSenderRole,
 } from "./owners.js";
 
 let directory: string;
@@ -66,5 +66,26 @@ describe("claim codes", () => {
     expect(await removeOwner("x")).toBe(true);
     expect(await removeOwner("x")).toBe(false);
     expect(await resolveSenderRole("x")).toBe("guest");
+  });
+
+  it("limits claim attempts per sender per day", async () => {
+    await issueClaimCode(0);
+    for (let attempt = 0; attempt < CLAIM_ATTEMPTS_PER_DAY; attempt += 1) {
+      expect(await redeemClaimCode("PINGU-ZZZZZZ", { senderId: "spammer" }, 1)).toBe("no-match");
+    }
+    expect(await redeemClaimCode("PINGU-ZZZZZZ", { senderId: "spammer" }, 2)).toBe("rate-limited");
+    expect(await redeemClaimCode("PINGU-ZZZZZZ", { senderId: "someone-else" }, 2)).toBe("no-match");
+    expect(await redeemClaimCode("PINGU-ZZZZZZ", { senderId: "spammer" }, 2 + 24 * 60 * 60 * 1000)).toBe("no-match");
+  });
+
+  it("remembers the chat an environment-listed owner writes from", async () => {
+    process.env.PINGU_OWNER_SENDER_IDS = "env-owner";
+    expect(await ownerSpaceIds()).toEqual([]);
+    await recordOwnerSpace("env-owner", "dm-env");
+    expect(await ownerSpaceIds()).toEqual(["dm-env"]);
+    await recordOwnerSpace("stranger", "dm-x");
+    expect(await ownerSpaceIds()).toEqual(["dm-env"]);
+    await recordOwnerSpace("env-owner", "dm-env-2");
+    expect(await ownerSpaceIds()).toEqual(["dm-env-2"]);
   });
 });

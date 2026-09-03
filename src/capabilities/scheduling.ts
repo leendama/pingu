@@ -90,7 +90,7 @@ export function schedulingPlugin(service: SchedulingService, settings: { ownerNa
             durationMinutes: numberValue(args.duration_minutes, settings.defaultDurationMinutes),
             guestTimezone: timezone,
           });
-          return { output: JSON.stringify({ submitted: true, code: result.request.code, tell_the_guest: result.guestText }) };
+          return { output: JSON.stringify({ submitted: result.delivered, delivered_to_owner: result.delivered, code: result.request.code, tell_the_guest: result.guestText }) };
         },
       },
       {

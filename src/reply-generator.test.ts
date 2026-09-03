@@ -163,11 +163,22 @@ describe("createReplyGenerator", () => {
     expect(secondInput.at(-1)).toMatchObject({ call_id: "call-9", output: JSON.stringify({ error: "Unknown tool: mystery_tool" }) });
   });
 
-  it("reports the whole turn's token usage once", async () => {
+  it("reports every response's usage, including those of a turn that fails and its retry", async () => {
     const onUsage = vi.fn();
     const { generate } = makeGenerator([toolCallResponse("get_current_time"), textResponse("done", 20)], { onUsage });
     await generate("chat", "time?", freshContext());
-    expect(onUsage).toHaveBeenCalledOnce();
-    expect(onUsage.mock.calls[0]?.[0]).toEqual({ totalTokens: 25 });
+    expect(onUsage.mock.calls.map((call) => call[0])).toEqual([{ totalTokens: 5 }, { totalTokens: 20 }]);
+
+    const counted = vi.fn();
+    const failing = makeGenerator([toolCallResponse("get_current_time"), incompleteResponse(), textResponse("recovered", 7)], { onUsage: counted });
+    await expect(failing.generate("chat", "hello", freshContext())).resolves.toBe("recovered");
+    expect(counted.mock.calls.map((call) => call[0])).toEqual([{ totalTokens: 5 }, { totalTokens: 7 }]);
+  });
+
+  it("takes the tool-round limit from the turn's context", async () => {
+    const looping = Array.from({ length: 6 }, (_, index) => toolCallResponse("get_current_time", `call-${index}`));
+    const { generate } = makeGenerator(looping, { maxToolRounds: (context: ToolRunContext) => context.role === "guest" ? 1 : 6, errorStatus: () => undefined });
+    const guest = { ...freshContext(), role: "guest" as const };
+    await expect(generate("chat", "hello", guest)).rejects.toThrow("exceeded the tool-call limit");
   });
 });

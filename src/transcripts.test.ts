@@ -1,9 +1,9 @@
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
-import { appendTranscript, compactEntries, deleteAllPinguData, forgetTranscript, readTranscript, type TranscriptEntry } from "./transcripts.js";
+import { appendTranscript, cleanupTranscripts, compactEntries, deleteAllPinguData, forgetTranscript, readTranscript, type TranscriptEntry } from "./transcripts.js";
 
 let directory: string;
 const settings = { retentionDays: 30, maxEntries: 80, maxChars: 60_000 };
@@ -81,5 +81,23 @@ describe("transcript files", () => {
     const [file] = await readdir(join(directory, "transcripts"));
     await writeFile(join(directory, "transcripts", file!), JSON.stringify({ version: 1, entries: "nonsense" }));
     expect(await readTranscript("space-c", settings, now)).toEqual([]);
+  });
+
+  it("removes expired history from disk on read, not only from the reply", async () => {
+    await appendTranscript("space-d", [user("old")], settings, now - 40 * 24 * 60 * 60 * 1000);
+    const [file] = await readdir(join(directory, "transcripts"));
+    expect(await readFile(join(directory, "transcripts", file!), "utf8")).toContain("old");
+    expect(await readTranscript("space-d", settings, now)).toEqual([]);
+    expect(await readFile(join(directory, "transcripts", file!), "utf8")).not.toContain("old");
+  });
+
+  it("cleans up chats that never receive another message", async () => {
+    await appendTranscript("quiet", [user("long ago")], settings, now - 40 * 24 * 60 * 60 * 1000);
+    await appendTranscript("active", [user("recent")], settings, now);
+    await writeFile(join(directory, "transcripts", "stray.json"), "not json");
+    const result = await cleanupTranscripts(settings, now);
+    expect(result).toEqual({ trimmed: 1, deleted: 2 });
+    expect(await readdir(join(directory, "transcripts"))).toHaveLength(1);
+    expect(await readTranscript("active", settings, now)).toEqual([user("recent")]);
   });
 });

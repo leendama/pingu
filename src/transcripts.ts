@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import { readdir, rm } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
+import { startPoller } from "./poller.js";
 import { dataPath, JsonFileStore } from "./state.js";
 
 /** Conversation history lives on the owner's disk, one file per chat, for every model provider. */
@@ -81,9 +83,66 @@ export function compactEntries(entries: TranscriptEntry[], settings: TranscriptS
   return kept;
 }
 
+/** Read a chat's history. Anything retention or size limits drop is removed from disk in the same step, not merely hidden. */
 export async function readTranscript(spaceId: string, settings: TranscriptSettings, now = Date.now()): Promise<ResponseInputItem[]> {
-  const file = await storeFor(spaceId).read();
-  return compactEntries(file.entries, settings, now).map((entry) => entry.item);
+  return storeFor(spaceId).update<ResponseInputItem[]>((file) => {
+    const compacted = compactEntries(file.entries, settings, now);
+    const changed = compacted.length !== file.entries.length;
+    file.entries = compacted;
+    return { result: compacted.map((entry) => entry.item), changed };
+  });
+}
+
+/**
+ * Apply retention to every transcript on disk, including chats that never
+ * receive another message. Empty transcripts are deleted outright.
+ */
+export async function cleanupTranscripts(settings: TranscriptSettings, now = Date.now()): Promise<{ trimmed: number; deleted: number }> {
+  const directory = dataPath(TRANSCRIPT_DIRECTORY);
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { trimmed: 0, deleted: 0 };
+    throw error;
+  }
+  let trimmed = 0;
+  let deleted = 0;
+  for (const name of names) {
+    let spaceId: string | undefined;
+    try {
+      const parsed = JSON.parse(await readFile(join(directory, name), "utf8")) as { spaceId?: unknown };
+      spaceId = typeof parsed.spaceId === "string" ? parsed.spaceId : undefined;
+    } catch {
+      spaceId = undefined;
+    }
+    if (!spaceId || transcriptFilename(spaceId) !== `${TRANSCRIPT_DIRECTORY}/${name}`) {
+      // Unreadable or foreign file: it holds nothing Pingu can use, so it goes.
+      await rm(join(directory, name), { force: true });
+      deleted += 1;
+      continue;
+    }
+    const remaining = await storeFor(spaceId).update<number>((file) => {
+      const compacted = compactEntries(file.entries, settings, now);
+      const changed = compacted.length !== file.entries.length;
+      if (changed) trimmed += 1;
+      file.entries = compacted;
+      return { result: compacted.length, changed };
+    });
+    if (remaining === 0) {
+      await rm(join(directory, name), { force: true });
+      stores.delete(transcriptFilename(spaceId));
+      deleted += 1;
+    }
+  }
+  return { trimmed, deleted };
+}
+
+export function startTranscriptCleanup(settings: TranscriptSettings, intervalMs = 6 * 60 * 60_000): () => void {
+  return startPoller("Transcript cleanup", intervalMs, async () => {
+    const result = await cleanupTranscripts(settings);
+    if (result.trimmed || result.deleted) console.log("Transcript cleanup:", result);
+  });
 }
 
 export async function appendTranscript(spaceId: string, items: ResponseInputItem[], settings: TranscriptSettings, now = Date.now()): Promise<void> {

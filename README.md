@@ -91,9 +91,10 @@ Anyone can text the number, so the limits matter:
 
 | Limit | Default | Setting |
 |---|---|---|
-| Messages per unknown sender per day | 20 | `PINGU_GUEST_DAILY_MESSAGE_CAP` |
-| Model tokens all guests may use per day | 300,000 | `PINGU_GUEST_DAILY_TOKEN_BUDGET` |
-| Active reminders per guest | 5 | `PINGU_GUEST_MAX_REMINDERS` |
+| Messages per unknown sender per day, every message in a burst counted | 20 | `PINGU_GUEST_DAILY_MESSAGE_CAP` |
+| Model tokens all guests may use per day, reserved before each turn and counted per response | 300,000 | `PINGU_GUEST_DAILY_TOKEN_BUDGET` |
+| Tokens reserved per guest turn, longest guest text, tool rounds per guest turn | 20,000, 2,000 chars, 4 | `PINGU_GUEST_MAX_TURN_TOKENS`, `PINGU_GUEST_MAX_INBOUND_CHARS`, `PINGU_GUEST_MAX_TOOL_ROUNDS` |
+| Active reminders per guest, across all chats | 5 | `PINGU_GUEST_MAX_REMINDERS` |
 | Pending meeting requests per guest | 1 | fixed |
 | Bookable hours | 09:00 to 17:00 weekdays | `PINGU_BOOKABLE_HOURS`, `PINGU_BOOKABLE_DAYS` |
 | Free windows shown per question | 5 | fixed |
@@ -133,8 +134,10 @@ This runs the type checks, tests, and production build.
 - Private Gmail, Calendar, and Granola tools exist only in the verified owner's direct messages. Groups and guests never see them.
 - Email sending needs a delivered draft and your yes in the next message.
 - Deleting a recurring event, an event with attendees, or several events at once needs your yes. A single personal event deletes in one step.
-- Anything Pingu reads from email, meeting notes, or event descriptions is treated as information, never as an instruction. A turn that read such content cannot delete anything without your yes.
-- Every calendar write is read back from Google before Pingu says it is done. If Google rejected it, Pingu says nothing was changed.
-- Guest bookings are created only after your reply, after rechecking the slot.
+- Anything Pingu reads from email or meeting notes is treated as information, never as an instruction. Once a turn has read such content, every action tool is blocked for the rest of that turn except creating a review-only draft; Pingu asks you to repeat the request as a fresh message.
+- Every calendar write is read back from Google and compared field by field with what was requested before Pingu says it is done. If Google rejected it, Pingu says nothing was changed. If the event came back different, Pingu says so.
+- Guest bookings are created only after your reply, after rechecking the slot. A guest is told a request was sent only when at least one owner chat actually received it.
+- Group renames and membership changes are owner-only, even in groups.
+- Reminders belong to whoever created them; nobody else can list or cancel them.
 
 See [SECURITY.md](SECURITY.md) for the security model and how to report a problem.

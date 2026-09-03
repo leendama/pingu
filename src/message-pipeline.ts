@@ -1,6 +1,6 @@
 import { markdown, voice } from "spectrum-ts";
 import type { Content, Message, Space } from "spectrum-ts";
-import { guestLimitMessage, type GuestAdmission } from "./guests.js";
+import { guestLimitMessage, guestTooLongMessage, type GuestAdmission } from "./guests.js";
 import type { ClaimOutcome } from "./owners.js";
 import type { SenderRole, ToolRunContext } from "./plugins.js";
 import type { PendingEmail } from "./pending-emails.js";
@@ -25,10 +25,16 @@ export interface MessagePipelineDependencies {
   resolveRole: (senderId: string | undefined) => Promise<SenderRole>;
   /** Redeem an owner claim code texted to Pingu; undefined when the text is not a code. */
   redeemClaim?: (text: string, sender: { senderId: string; spaceId: string }) => Promise<ClaimOutcome | undefined>;
-  /** Count a guest message against the caps and report first contact. */
-  admitGuest?: (senderId: string) => Promise<GuestAdmission>;
+  /** Count every message of a guest turn against the caps, reserve budget, and report first contact. */
+  admitGuest?: (senderId: string, messageCount: number) => Promise<GuestAdmission>;
+  /** Give back the budget reserved by `admitGuest` once the turn is over, however it ended. */
+  releaseGuest?: (senderId: string) => Promise<void>;
+  /** Longest combined inbound text a guest turn may carry. */
+  guestMaxInboundChars?: number;
   /** Text an unknown sender sees before their first reply. */
   guestDisclosure?: string;
+  /** Remember the direct-message chat a verified owner writes from, so notices can reach them. */
+  recordOwnerSpace?: (senderId: string, spaceId: string) => Promise<void>;
   /** Let a verified owner resolve a scheduling request by replying; returns the reply to send when handled. */
   resolveOwnerReply?: (input: { message: Message; texts: readonly string[]; spaceId: string; senderId: string }) => Promise<string | undefined>;
   /** Called once per turn after a reply (text or rich response) reaches the user. */
@@ -110,6 +116,7 @@ export function combineInboundMessages(messages: readonly Message[]): string {
 function claimOutcomeText(outcome: ClaimOutcome, assistantName: string): string {
   if (outcome === "verified") return `Verified. This number is now ${assistantName}'s owner. Private tools work in this chat.`;
   if (outcome === "expired") return "That claim code has expired. Generate a new one in the setup page and text it within an hour.";
+  if (outcome === "rate-limited") return "Too many claim attempts today. Try again tomorrow.";
   return "That claim code doesn't match the active one. Generate a fresh code in the setup page and text it here.";
 }
 
@@ -160,23 +167,44 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       await sendNotice(space, message, false, "I can't tell whether this is a group chat, so private tools are disabled for this message.", "unknown-conversation");
     }
 
+    const guestKey = senderId ?? `space:${space.id}`;
+    let reservedForGuest = false;
     if (role === "guest" && dependencies.admitGuest) {
-      const admission = await dependencies.admitGuest(senderId ?? `space:${space.id}`);
+      const admission = await dependencies.admitGuest(guestKey, messages.length);
       if (!admission.allowed) {
         await sendNotice(space, message, isGroup, guestLimitMessage(admission.reason, dependencies.assistantName), "guest-limit");
         return;
       }
+      reservedForGuest = true;
       if (admission.firstContact && !isGroup && dependencies.guestDisclosure) {
         await sendNotice(space, message, false, dependencies.guestDisclosure, "first-contact");
       }
     }
+    const releaseGuest = async () => {
+      if (!reservedForGuest) return;
+      reservedForGuest = false;
+      await dependencies.releaseGuest?.(guestKey).catch((error) => {
+        console.error("Unable to release a guest budget reservation:", error instanceof Error ? error.message : String(error));
+      });
+    };
 
-    if (role === "owner" && senderId && !isGroup && dependencies.resolveOwnerReply) {
-      const handled = await dependencies.resolveOwnerReply({ message, texts: directTexts, spaceId: space.id, senderId });
-      if (handled) {
-        await sendNotice(space, message, false, handled, "scheduling-reply");
-        dependencies.onReplyDelivered?.();
-        return;
+    if (role === "guest" && dependencies.guestMaxInboundChars && inboundText.length > dependencies.guestMaxInboundChars) {
+      await sendNotice(space, message, isGroup, guestTooLongMessage(dependencies.guestMaxInboundChars), "guest-too-long");
+      await releaseGuest();
+      return;
+    }
+
+    if (role === "owner" && senderId && !isGroup) {
+      await dependencies.recordOwnerSpace?.(senderId, space.id).catch((error) => {
+        console.error("Unable to record the owner's chat:", error instanceof Error ? error.message : String(error));
+      });
+      if (dependencies.resolveOwnerReply) {
+        const handled = await dependencies.resolveOwnerReply({ message, texts: directTexts, spaceId: space.id, senderId });
+        if (handled) {
+          await sendNotice(space, message, false, handled, "scheduling-reply");
+          dependencies.onReplyDelivered?.();
+          return;
+        }
       }
     }
 
@@ -272,6 +300,8 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
         }
         if (!failureDelivered) await sendNotice(space, message, isGroup, failure, "fallback failure");
       }
+    } finally {
+      await releaseGuest();
     }
   };
 }

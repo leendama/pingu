@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getPendingAction } from "../pending-confirmations.js";
 import type { ToolRunContext } from "../plugins.js";
-import { calendarPlugin, deleteConfirmationReason, type CalendarEventData, type CalendarPort } from "./calendar.js";
+import { calendarPlugin, deleteConfirmationReason, eventMismatches, type CalendarEventData, type CalendarPort } from "./calendar.js";
 
 let directory: string;
 beforeAll(async () => {
@@ -167,10 +167,9 @@ describe("calendarPlugin", () => {
     expect(JSON.parse(confirmed.output)).toMatchObject({ deleted: true, verified: true });
   });
 
-  it("asks before deleting a recurring event and after reading third-party content", () => {
-    expect(deleteConfirmationReason({ id: "r", recurringEventId: "series" }, context)).toContain("recurring");
-    expect(deleteConfirmationReason({ id: "p" }, context)).toBeUndefined();
-    expect(deleteConfirmationReason({ id: "p" }, { untrustedContentSeen: true })).toContain("written by someone else");
+  it("asks before deleting a recurring event but not a plain personal one", () => {
+    expect(deleteConfirmationReason({ id: "r", recurringEventId: "series" })).toContain("recurring");
+    expect(deleteConfirmationReason({ id: "p" })).toBeUndefined();
   });
 
   it("asks before a bulk plan deletes duplicates", async () => {
@@ -399,5 +398,37 @@ describe("calendarPlugin", () => {
     const plugin = calendarPlugin(fakePort([]));
     expect(plugin.sideEffectingTools).toEqual(["set_calendar_event_color", "delete_calendar_event", "reschedule_calendar_event", "bulk_reschedule_calendar_events", "create_calendar_event", "edit_calendar_event"]);
     expect(plugin.privateTools).toEqual(["set_calendar_event_color", "search_calendar", "delete_calendar_event", "reschedule_calendar_event", "bulk_reschedule_calendar_events", "create_calendar_event", "edit_calendar_event"]);
+  });
+
+  it("compares every requested field against the read-back event", () => {
+    const zones = { timezone: "UTC", allDayTimezone: "UTC" };
+    const event: CalendarEventData = {
+      id: "e", summary: "Standup", start: { dateTime: "2026-09-01T09:00:00Z" }, end: { dateTime: "2026-09-01T09:15:00Z" },
+      location: "Room 4", description: "notes", attendees: [{ email: "me@example.com", self: true }, { email: "A@example.com" }],
+    };
+    expect(eventMismatches(event, { summary: "Standup", start: { dateTime: "2026-09-01T10:00:00+01:00" }, attendees: ["a@example.com"], location: "Room 4" }, zones)).toEqual([]);
+    expect(eventMismatches(event, { summary: "Retro", end: { dateTime: "2026-09-01T09:30:00Z" }, attendees: ["b@example.com"], description: "" }, zones)).toEqual(["title", "end time", "description", "attendees (b@example.com)"]);
+  });
+
+  it("refuses to report a create or edit whose read-back does not match", async () => {
+    const calls: RecordedCall[] = [];
+    const port = fakePort(calls, [{ id: "evt-9", summary: "Old" }]);
+    const insert = port.insertEvent.bind(port);
+    port.insertEvent = async (body, sendUpdates) => { const event = await insert({ ...body, summary: "Something else" }, sendUpdates); return event; };
+    const plugin = calendarPlugin(port);
+    const created = await plugin.run("create_calendar_event", JSON.stringify({
+      title: "Standup", start: "2026-09-01T09:00:00", end: "2026-09-01T09:15:00",
+      timezone: "UTC", description: null, location: null, attendees: [],
+    }), context);
+    expect(JSON.parse(created.output).error).toMatch(/does not match the request \(title\)/);
+
+    const patch = port.patchEvent.bind(port);
+    port.patchEvent = async (id, body, sendUpdates) => patch(id, { ...body, location: "Elsewhere" }, sendUpdates);
+    const edited = await plugin.run("edit_calendar_event", JSON.stringify({
+      event_id: "evt-9", title: "New", new_start: null, new_end: null,
+      timezone: "UTC", description: null, clear_description: false,
+      location: "Room 4", clear_location: false, attendees: null,
+    }), context);
+    expect(JSON.parse(edited.output).error).toMatch(/does not match the request \(location\)/);
   });
 });

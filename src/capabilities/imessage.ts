@@ -156,6 +156,7 @@ export function imessagePlugin(options: { voice?: boolean } = {}): PinguPlugin {
         },
         private: false,
         groupOnly: true,
+        ownerOnly: true,
         run: async (args, context) => {
           const groupName = stringValue(args.name);
           if (!groupName) throw new Error("Group name is required.");
@@ -178,6 +179,7 @@ export function imessagePlugin(options: { voice?: boolean } = {}): PinguPlugin {
         },
         private: false,
         groupOnly: true,
+        ownerOnly: true,
         run: async (args, context) => {
           const members = stringArray(args.members);
           if (members.length === 0) throw new Error("At least one member is required.");
@@ -200,6 +202,7 @@ export function imessagePlugin(options: { voice?: boolean } = {}): PinguPlugin {
         },
         private: false,
         groupOnly: true,
+        ownerOnly: true,
         run: async (args, context) => {
           const members = stringArray(args.members);
           if (members.length === 0) throw new Error("At least one member is required.");

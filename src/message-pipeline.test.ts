@@ -258,7 +258,7 @@ describe("guest handling", () => {
     const admitGuest = vi.fn(async () => ({ allowed: true as const, firstContact: true, remaining: 19 }));
     const send = vi.fn(async (_content: unknown) => undefined);
     await createMessageProcessor({ ...deps, admitGuest, guestDisclosure: "Hi, I'm Pingu, Alex's assistant." })(directSpace(send), inboundMessage("is alex free friday?", "guest-1"));
-    expect(admitGuest).toHaveBeenCalledWith("guest-1");
+    expect(admitGuest).toHaveBeenCalledWith("guest-1", 1);
     expect(await sentContentText(send, 0)).toContain("Alex's assistant");
     expect(await sentContentText(send, 1)).toContain("Sure");
   });
@@ -270,6 +270,27 @@ describe("guest handling", () => {
     await createMessageProcessor({ ...deps, admitGuest })(directSpace(send), inboundMessage("again", "guest-1"));
     expect(deps.generateReply).not.toHaveBeenCalled();
     expect(await sentContentText(send, 0)).toContain("message limit");
+  });
+
+  it("counts every message of a burst, releases the reservation afterwards, and refuses oversized text", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const admitGuest = vi.fn(async () => ({ allowed: true as const, firstContact: false, remaining: 1 }));
+    const releaseGuest = vi.fn(async () => undefined);
+    await createMessageProcessor({ ...deps, admitGuest, releaseGuest })(directSpace(), [inboundMessage("one", "g"), inboundMessage("two", "g")]);
+    expect(admitGuest).toHaveBeenCalledWith("g", 2);
+    expect(releaseGuest).toHaveBeenCalledOnce();
+
+    deps.generateReply.mockRejectedValue(new Error("boom"));
+    await createMessageProcessor({ ...deps, admitGuest, releaseGuest })(directSpace(), inboundMessage("again", "g"));
+    expect(releaseGuest).toHaveBeenCalledTimes(2);
+
+    const send = vi.fn(async (_content: unknown) => undefined);
+    deps.generateReply.mockImplementation(async () => "ok");
+    await createMessageProcessor({ ...deps, admitGuest, releaseGuest, guestMaxInboundChars: 10 })(directSpace(send), inboundMessage("this is far too long", "g"));
+    expect(await sentContentText(send, 0)).toContain("too long");
+    expect(deps.generateReply).toHaveBeenCalledTimes(2);
+    expect(releaseGuest).toHaveBeenCalledTimes(3);
   });
 
   it("never counts the owner against guest limits", async () => {
@@ -290,6 +311,16 @@ describe("owner replies to scheduling requests", () => {
     expect(resolveOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ texts: ["yes"], spaceId: "chat", senderId: "owner-1" }));
     expect(deps.generateReply).not.toHaveBeenCalled();
     expect(await sentContentText(send, 0)).toContain("Booked");
+  });
+
+  it("records the owner's chat so notices can reach them", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const recordOwnerSpace = vi.fn(async () => undefined);
+    await createMessageProcessor({ ...deps, recordOwnerSpace })(directSpace(), inboundMessage("hi"));
+    expect(recordOwnerSpace).toHaveBeenCalledWith("owner-1", "chat");
+    await createMessageProcessor({ ...deps, recordOwnerSpace })(directSpace(), inboundMessage("hi", "guest-1"));
+    expect(recordOwnerSpace).toHaveBeenCalledOnce();
   });
 
   it("falls through to the model when the reply is not a scheduling decision", async () => {

@@ -29,6 +29,18 @@ First public release.
 - Content read from email or meeting notes never authorises a deletion in the same turn.
 - Calendar creates, edits, deletes, and bookings are read back from Google before success is reported.
 
+### Hardening after review
+
+- A guest is told a request was sent only when at least one owner chat received it; the owner's chat is recorded whenever a verified owner writes, including owners allowed through the environment.
+- Booking transitions are claimed atomically (pending to approving, booked to cancelling), so two chats cannot both act on one request; transitions interrupted by a restart are recovered from the calendar.
+- The guest token budget reserves an estimated turn cost before admission, counts every model response including failed turns, counts every message in a burst, and refuses oversized texts.
+- Reminders record their creator; guest caps apply per sender across chats, and only the creator can list or cancel a reminder.
+- Group rename and membership changes are owner-only.
+- After a turn reads email or meeting notes, every action tool is blocked for that turn except review-only drafts.
+- Calendar creates and edits, and guest bookings, compare every requested field against the read-back event; a missing Meet link is reported as a partial success.
+- Transcript retention removes expired entries from disk on read and in a periodic cleanup, so quiet chats expire too.
+- Claim-code attempts are limited per sender per day.
+
 ### Setup
 
 - The wizard shows the claim code, lists verified owners, and has settings for the model endpoint, bookable hours, guest caps, retention, and telemetry.

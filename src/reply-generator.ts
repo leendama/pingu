@@ -30,10 +30,10 @@ export interface ReplyGeneratorDeps {
   runTool(name: string, argumentsJson: string, context: ToolRunContext): Promise<{ handled: true; output: string } | { handled: false }>;
   /** HTTP status of a model failure; defaults to reading OpenAI.APIError. */
   errorStatus?(error: unknown): number | undefined;
-  maxToolRounds?: number;
+  maxToolRounds?: number | ((context: ToolRunContext) => number);
   /** Keep reasoning items in the history. Only OpenAI accepts its own encrypted reasoning back. */
   keepReasoning?: boolean;
-  /** Called once per successful turn with the tokens the whole turn used. */
+  /** Called after every model response, including those of a turn that later fails or is retried, with that response's tokens. */
   onUsage?(usage: { totalTokens: number }, context: ToolRunContext): void | Promise<void>;
 }
 
@@ -60,22 +60,25 @@ function userMessage(text: string): ResponseInputItem {
  */
 export function createReplyGenerator(deps: ReplyGeneratorDeps) {
   const errorStatus = deps.errorStatus ?? ((error: unknown) => error instanceof OpenAI.APIError ? error.status : undefined);
-  const maxToolRounds = deps.maxToolRounds ?? 6;
   const keepReasoning = deps.keepReasoning ?? false;
+  const roundsFor = (context: ToolRunContext) => typeof deps.maxToolRounds === "function" ? deps.maxToolRounds(context) : deps.maxToolRounds ?? 6;
+
+  /** Every response is billed, so every response is counted, before anything else can throw. */
+  async function respond(input: ResponseInputItem[], context: ToolRunContext): Promise<Response> {
+    const response = await deps.respond(input, context);
+    const totalTokens = response.usage?.total_tokens ?? 0;
+    if (totalTokens > 0) await deps.onUsage?.({ totalTokens }, context);
+    return response;
+  }
 
   async function runTurn(history: ResponseInputItem[], inboundText: string, context: ToolRunContext): Promise<{ reply: string; newItems: ResponseInputItem[] }> {
     const newItems: ResponseInputItem[] = [userMessage(inboundText)];
-    let totalTokens = 0;
-    let response = await deps.respond([...history, ...newItems], context);
+    const maxToolRounds = roundsFor(context);
+    let response = await respond([...history, ...newItems], context);
     for (let round = 0; round <= maxToolRounds; round += 1) {
-      totalTokens += response.usage?.total_tokens ?? 0;
       newItems.push(...historyItems(response.output, keepReasoning));
       const calls = response.output.filter((item) => item.type === "function_call");
-      if (calls.length === 0) {
-        const reply = extractReply(response);
-        await deps.onUsage?.({ totalTokens }, context);
-        return { reply, newItems };
-      }
+      if (calls.length === 0) return { reply: extractReply(response), newItems };
       if (round === maxToolRounds) break;
       for (const call of calls) {
         const result = await deps.runTool(call.name, call.arguments, context);
@@ -85,7 +88,7 @@ export function createReplyGenerator(deps: ReplyGeneratorDeps) {
           output: result.handled ? result.output : JSON.stringify({ error: `Unknown tool: ${call.name}` }),
         });
       }
-      response = await deps.respond([...history, ...newItems], context);
+      response = await respond([...history, ...newItems], context);
     }
     throw new Error("The agent exceeded the tool-call limit.");
   }

@@ -56,6 +56,13 @@ First public release.
 
 - Releases can ship Pingu's own Google app registration. `npm run connect:google` and the wizard on localhost then need no Google Cloud project: only Google's consent screen, with a one-time "unverified app" notice. Own clients still work, and are required for a wizard on a remote host.
 
+### Three-step onboarding
+
+- `npm run start` with nothing configured generates the wizard's secrets for a localhost install, prints a one-time sign-in link, and opens it on a Mac. Public hosts keep explicit secrets.
+- The wizard's last screen shows the claim code as soon as Google is connected and nobody owns Pingu, and the log prints it at every start until then.
+- A running Ollama or LM Studio is detected and preselected with a tool-capable model; no API key is needed for it.
+- The Photon section links to the dashboard for the line, and **Test connections** now connects to Photon once to prove the credentials.
+
 ### Setup
 
 - The wizard shows the claim code, lists verified owners, and has settings for the model endpoint, bookable hours, guest caps, retention, and telemetry.

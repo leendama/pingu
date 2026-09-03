@@ -4,29 +4,32 @@ Pingu is guided self-hosting: a few commands, a browser wizard, and one Google C
 
 ## Run it on your Mac
 
-You need Node.js 22 or newer.
-
-1. Create a Photon Spectrum project at [app.photon.codes](https://app.photon.codes).
-2. Connect an iMessage line to the project.
-3. Create an OpenAI API key, or run a local model (see "Use a local model").
-4. Copy `.env.example` to `.env`.
-5. Add your Photon project ID, Photon secret, and OpenAI key to `.env`.
-6. Install and start the assistant:
+You need Node.js 22 or newer and a [Photon](https://app.photon.codes) project with an iMessage line attached.
 
 ```bash
 npm install
 npm run start
 ```
 
+With nothing configured, `npm run start` generates the wizard's secrets for this machine, prints a one-time link, and opens it (on a Mac). The config key is kept in the data directory so saved settings survive restarts; the setup token is new for every run and lives only in that link. The wizard asks for:
+
+1. **Photon**: the project ID and secret from the dashboard. Attach an iMessage line there; **Test connections** proves Photon accepts the credentials, and Pingu replying to your text proves the line.
+2. **Model**: a running Ollama or LM Studio on this machine is detected and preselected with a tool-capable model. Otherwise paste an OpenAI API key.
+3. **Google**: choose **Connect Google**. With a release that ships Pingu's own app registration this is only Google's consent screen; otherwise enter your own client (see below).
+
+Save, and the last screen shows the claim code. Text it from your phone; the page flips to "Pingu is ready" when the first reply lands.
+
+Prefer a file? Copy `.env.example` to `.env`, add the Photon and OpenAI values, run `npm run connect:google`, then `npm run start`. The wizard is skipped when those three values are set and no `PHOTON_SETUP_TOKEN` is.
+
 ## Prove you are the owner
 
-Anyone can text your Pingu number. Until you claim it, every sender is a guest and private tools stay off.
+Anyone can text your Pingu number. Until you claim it, every sender is a guest and private tools stay off. The wizard's last screen shows a claim code, and the log prints one at every start while nobody owns Pingu. To print a fresh one at any time:
 
 ```bash
 npm run claim
 ```
 
-Text the printed code (for example `PINGU-4F7K2Q`) to your Pingu number from your own phone within an hour. Pingu replies "Verified" and records the exact sender id Spectrum reports. Typing a phone number into a settings file is deliberately not enough: ids are opaque, and a claim proves you hold the phone.
+Text the code (for example `PINGU-4F7K2Q`) to your Pingu number from your own phone within an hour. Pingu replies "Verified" and records the exact sender id Spectrum reports. Typing a phone number into a settings file is deliberately not enough: ids are opaque, and a claim proves you hold the phone.
 
 Repeat from another device to verify a second handle. Remove a handle from the setup page, or by deleting it from `owners.json` in the data directory.
 

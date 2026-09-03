@@ -18,6 +18,11 @@ vi.mock("./google.js", () => ({
   }),
 }));
 
+vi.mock("./local-models.js", () => ({
+  detectLocalModelEndpoint: async () => (process.env.TEST_LOCAL_MODEL ? { name: "Ollama", baseUrl: "http://localhost:11434/v1", models: ["qwen3:8b", "llama3.2"] } : undefined),
+  preferredLocalModel: (models: string[]) => models[0],
+}));
+
 vi.mock("./diagnostics.js", () => ({
   runDiagnostics: async () => [
     { name: "provider", label: "OpenAI", status: "ok", detail: "The key can use gpt-5.6-luna." },
@@ -30,7 +35,7 @@ const servers: Server[] = [];
 
 afterEach(async () => {
   resetRuntimeStatus();
-  for (const name of ["PHOTON_DATA_DIR", "PHOTON_CONFIG_KEY", "PHOTON_SETUP_TOKEN", "PHOTON_PUBLIC_URL", "PINGU_OWNER_SENDER_IDS", "PINGU_SHARED_GOOGLE_CLIENT_ID", "PINGU_SHARED_GOOGLE_CLIENT_SECRET"]) delete process.env[name];
+  for (const name of ["PHOTON_DATA_DIR", "PHOTON_CONFIG_KEY", "PHOTON_SETUP_TOKEN", "PHOTON_PUBLIC_URL", "PINGU_OWNER_SENDER_IDS", "PINGU_SHARED_GOOGLE_CLIENT_ID", "PINGU_SHARED_GOOGLE_CLIENT_SECRET", "TEST_LOCAL_MODEL"]) delete process.env[name];
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
@@ -331,5 +336,52 @@ describe("shared Google app", () => {
     const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
     expect(page).toContain("Create a Web OAuth client");
     expect(response.status).toBe(200);
+  });
+});
+
+describe("three-step onboarding", () => {
+  it("signs in through the one-time link and rejects a wrong one", async () => {
+    const { base } = await startServer();
+    const entered = await fetch(`${base}/setup/enter?token=${encodeURIComponent(SETUP_TOKEN)}`, { redirect: "manual" });
+    expect(entered.status).toBe(302);
+    const cookie = entered.headers.get("set-cookie")?.split(";")[0] ?? "";
+    expect((await fetch(`${base}/setup`, { headers: { cookie } })).status).toBe(200);
+    expect((await fetch(`${base}/setup/enter?token=wrong-token-but-long-enough`)).status).toBe(401);
+  });
+
+  it("puts the claim code on screen as the last step once Google is connected and nobody owns Pingu", async () => {
+    const { base } = await startServer();
+    const cookie = await loginCookie(base);
+    await saveConfig(savedConfig);
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("Last step: text this code");
+    expect(page).toMatch(/PINGU-[A-Z0-9]{6}/);
+    const { redeemClaimCode, activeClaimCode } = await import("./owners.js");
+    const code = (await activeClaimCode())!.code;
+    await redeemClaimCode(code, { senderId: "+15550101000", spaceId: "dm" });
+    const after = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(after).not.toContain("Last step: text this code");
+  });
+
+  it("preselects a local model server on a fresh install and saves without an API key", async () => {
+    process.env.TEST_LOCAL_MODEL = "1";
+    const { base } = await startServer(async () => ({ started: false, reason: "already-running" }));
+    const cookie = await loginCookie(base);
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("Found Ollama at");
+    expect(page).toContain('value="qwen3:8b"');
+    expect(page).toContain('value="http://localhost:11434/v1"');
+    const saved = await fetch(`${base}/setup/save`, { method: "POST", headers: { cookie }, body: saveBody({ openaiApiKey: "", openaiBaseUrl: "http://localhost:11434/v1", model: "qwen3:8b", photonProjectSecret: "photon-secret", googleClientSecret: "google-secret" }) });
+    expect(saved.status).toBe(200);
+    const { loadConfig } = await import("./config.js");
+    expect(await loadConfig()).toMatchObject({ openaiApiKey: "local", openaiBaseUrl: "http://localhost:11434/v1", model: "qwen3:8b" });
+  });
+
+  it("points at Photon's dashboard for the line and passes the credentials to the connection test", async () => {
+    const { base } = await startServer();
+    const cookie = await loginCookie(base);
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("https://app.photon.codes");
+    expect(page).toContain("proven by Pingu replying");
   });
 });

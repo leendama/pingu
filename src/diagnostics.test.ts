@@ -23,11 +23,12 @@ function probes(overrides: Partial<DiagnosticsProbes> = {}): DiagnosticsProbes {
     googleScopes: async () => allScopes,
     googleCalendar: async () => undefined,
     granola: async () => undefined,
+    photon: async () => undefined,
     ...overrides,
   };
 }
 
-const input = { openaiApiKey: "sk-test", model: "gpt-5.6-luna", granolaApiKey: "gr-key", google };
+const input = { openaiApiKey: "sk-test", model: "gpt-5.6-luna", granolaApiKey: "gr-key", google, photonProjectId: "project-1", photonProjectSecret: "photon-secret" };
 
 function byName(checks: Awaited<ReturnType<typeof runDiagnostics>>, name: string) {
   return checks.find((check) => check.name === name)!;
@@ -111,11 +112,17 @@ describe("runDiagnostics", () => {
     expect(byName(rejected, "granola")).toMatchObject({ status: "failed", detail: expect.stringContaining("401") });
   });
 
-  it("is honest that Photon cannot be probed statically", async () => {
+  it("connects to Photon once to prove the credentials, and is honest that the line is proven by a reply", async () => {
     const checks = await runDiagnostics(input, probes());
-    expect(byName(checks, "photon")).toMatchObject({
-      status: "skipped",
-      detail: expect.stringContaining("replying to your text"),
-    });
+    expect(byName(checks, "photon")).toMatchObject({ status: "ok", detail: expect.stringContaining("replying to your text") });
+
+    const rejected = await runDiagnostics(input, probes({ photon: async () => { throw new Error("401 invalid project secret"); } }));
+    expect(byName(rejected, "photon")).toMatchObject({ status: "failed", detail: expect.stringContaining("PROJECT_SECRET") });
+
+    const running = await runDiagnostics(input, probes({ photon: async () => { throw new Error("should not connect twice"); }, agentRunning: () => true }));
+    expect(byName(running, "photon").status).toBe("ok");
+
+    const unsaved = await runDiagnostics({ ...input, photonProjectId: undefined }, probes());
+    expect(byName(unsaved, "photon").status).toBe("skipped");
   });
 });

@@ -6,6 +6,7 @@ import type { StartOutcome } from "./agent-starter.js";
 import { loadConfig, publicUrl, saveConfig, type AssistantConfig } from "./config.js";
 import { runDiagnostics, type ConnectionCheck } from "./diagnostics.js";
 import { googleOAuthClient, googleScopes } from "./google.js";
+import { detectLocalModelEndpoint, preferredLocalModel, type LocalModelEndpoint } from "./local-models.js";
 import { activeClaimCode, CLAIM_CODE_TTL_MS, issueClaimCode, listOwners, removeOwner, type OwnerRecord } from "./owners.js";
 import { resolveGoogleClient } from "./runtime-settings.js";
 import { runtimeStatus } from "./runtime-status.js";
@@ -92,16 +93,32 @@ function renderOwners(view: OwnerView): string {
   return `<h2>Who is the owner</h2>${list}${claim}<form method="post" action="/setup/claim"><button class="${view.claim ? "quiet" : ""}">${view.claim ? "Generate a new code" : "Show a claim code"}</button></form>`;
 }
 
-function setup(config?: AssistantConfig, message = "", checks?: ConnectionCheck[], owners?: OwnerView): string {
+function renderLastStep(config: AssistantConfig | undefined, owners: OwnerView | undefined): string {
+  if (!config?.google.refreshToken || !owners || owners.owners.length > 0 || !owners.claim) return "";
+  const minutes = Math.round(CLAIM_CODE_TTL_MS / 60_000);
+  return `<div class="status"><strong>Last step: text this code to your Pingu number from your own phone.</strong><p class="code">${escapeHtml(owners.claim.code)}</p><small>Valid ${minutes} minutes. The number that sends it becomes the owner, and this page flips to "Pingu is ready" when the first reply lands.</small></div>`;
+}
+
+function modelSection(config: AssistantConfig | undefined, local: LocalModelEndpoint | undefined): string {
+  const detected = !config && local;
+  const baseUrl = config?.openaiBaseUrl ?? (detected ? local.baseUrl : "");
+  const model = config?.model ?? (detected ? preferredLocalModel(local.models) ?? "gpt-5.6-luna" : "gpt-5.6-luna");
+  const note = detected
+    ? `<p class="status">Found ${escapeHtml(local.name)} at <code>${escapeHtml(local.baseUrl)}</code>${local.models.length ? ` with ${escapeHtml(local.models.slice(0, 5).join(", "))}${local.models.length > 5 ? ", …" : ""}` : ""}. It is preselected; leave the API key blank to use it, or clear the endpoint to use OpenAI.</p>`
+    : "";
+  return `${note}<label>API key</label><input type="password" name="openaiApiKey" placeholder="${config ? "Leave blank to keep saved value" : detected ? "Not needed for a local model" : "sk-…"}" ${config || detected ? "" : "required"}><label>Model</label><input name="model" value="${escapeHtml(model)}" required>
+  <label>Endpoint (optional)</label><input name="openaiBaseUrl" value="${escapeHtml(baseUrl)}" placeholder="Leave blank for OpenAI, or e.g. http://host.docker.internal:11434/v1 for Ollama"><small>Works with OpenAI and tested OpenAI Responses-compatible endpoints that support function calling (Ollama, LM Studio). Inside Docker, <code>localhost</code> is the container; a model on your Mac is <code>host.docker.internal</code>. Voice replies need OpenAI.</small>`;
+}
+
+function setup(config?: AssistantConfig, message = "", checks?: ConnectionCheck[], owners?: OwnerView, local?: LocalModelEndpoint): string {
   const callback = `${publicUrl()}/auth/google/callback`;
   const checked = (value: boolean | undefined, fallback: boolean) => (value ?? fallback) ? "checked" : "";
-  return page(`<h1>Set up your assistant</h1><p>No source edits are required. Saved credentials are encrypted on the persistent disk.</p>${message ? `<p class="status">${escapeHtml(message)}</p>` : ""}${renderRuntime(config)}${renderChecks(checks)}<form method="post" action="/setup/save">
+  return page(`<h1>Set up your assistant</h1><p>No source edits are required. Saved credentials are encrypted on the persistent disk.</p>${message ? `<p class="status">${escapeHtml(message)}</p>` : ""}${renderLastStep(config, owners)}${renderRuntime(config)}${renderChecks(checks)}<form method="post" action="/setup/save">
   <label>Assistant name</label><input name="assistantName" value="${escapeHtml(config?.assistantName || "Pingu")}" required>
   <label>Your name</label><input name="ownerName" value="${escapeHtml(config?.ownerName)}" required>
   <label>Timezone</label><input name="timezone" value="${escapeHtml(config?.timezone || "UTC")}" required>
-  <h2>Photon Spectrum</h2><label>Project ID</label><input name="photonProjectId" value="${escapeHtml(config?.photonProjectId)}" required><label>Project secret</label><input type="password" name="photonProjectSecret" placeholder="${config ? "Leave blank to keep saved value" : ""}" ${config ? "" : "required"}>
-  <h2>Model</h2><label>API key</label><input type="password" name="openaiApiKey" placeholder="${config ? "Leave blank to keep saved value" : "sk-…"}" ${config ? "" : "required"}><label>Model</label><input name="model" value="${escapeHtml(config?.model || "gpt-5.6-luna")}" required>
-  <label>Endpoint (optional)</label><input name="openaiBaseUrl" value="${escapeHtml(config?.openaiBaseUrl ?? "")}" placeholder="Leave blank for OpenAI, or e.g. http://host.docker.internal:11434/v1 for Ollama"><small>Works with OpenAI and tested OpenAI Responses-compatible endpoints that support function calling (Ollama, LM Studio). Inside Docker, <code>localhost</code> is the container; a model on your Mac is <code>host.docker.internal</code>. Voice replies need OpenAI.</small>
+  <h2>Photon Spectrum</h2><small>Create a project and attach an iMessage line at <a href="https://app.photon.codes" target="_blank" rel="noopener">app.photon.codes</a>, then paste its ID and secret. <b>Test connections</b> below checks that Photon accepts them; whether a line is attached is proven by Pingu replying to your text.</small><label>Project ID</label><input name="photonProjectId" value="${escapeHtml(config?.photonProjectId)}" required><label>Project secret</label><input type="password" name="photonProjectSecret" placeholder="${config ? "Leave blank to keep saved value" : ""}" ${config ? "" : "required"}>
+  <h2>Model</h2>${modelSection(config, local)}
   <h2>Google</h2>${googleSection(config, callback)}
   <h2>Granola (optional)</h2><label>API key</label><input type="password" name="granolaApiKey" placeholder="${config ? "Leave blank to keep saved value" : ""}">
   <h2>Guests and bookings</h2><small>Anyone can text the number. Guests can chat, see your bookable windows, and request a meeting you approve by replying yes.</small>
@@ -134,13 +151,18 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(express.urlencoded({ extended: false, limit: "32kb" }));
 
-  async function ownerView(): Promise<OwnerView> {
-    const claim = await activeClaimCode();
-    return { owners: await listOwners(), claim: claim ? { code: claim.code, expiresAt: claim.expiresAt } : undefined };
+  async function ownerView(config?: AssistantConfig): Promise<OwnerView> {
+    const owners = await listOwners();
+    let claim = await activeClaimCode();
+    // Google connected and nobody verified yet: the only thing left is the text, so put the code on screen unasked.
+    if (owners.length === 0 && !claim && config?.google.refreshToken) claim = await issueClaimCode();
+    return { owners, claim: claim ? { code: claim.code, expiresAt: claim.expiresAt } : undefined };
   }
 
   async function render(message = "", checks?: ConnectionCheck[]): Promise<string> {
-    return setup(await loadConfig().catch(() => undefined), message, checks, await ownerView());
+    const config = await loadConfig().catch(() => undefined);
+    const local = config ? undefined : await detectLocalModelEndpoint().catch(() => undefined);
+    return setup(config, message, checks, await ownerView(config), local);
   }
 
   app.get("/healthz", async (_request, response) => {
@@ -159,6 +181,13 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
   app.post("/setup/login", (request, response) => {
     const supplied = String((request.body as Record<string, unknown>).token || "");
     if (!safeEqual(supplied, setupToken())) return response.status(401).send(login("Incorrect setup token."));
+    const issuedAt = String(Date.now());
+    response.setHeader("Set-Cookie", `photon_setup=${issuedAt}.${signature(issuedAt)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400${publicUrl().startsWith("https://") ? "; Secure" : ""}`);
+    response.redirect("/setup");
+  });
+  app.get("/setup/enter", (request, response) => {
+    const supplied = typeof request.query.token === "string" ? request.query.token : "";
+    if (!supplied || !safeEqual(supplied, setupToken())) return response.status(401).send(login("That setup link is not valid for this run. Restart Pingu and use the link it prints."));
     const issuedAt = String(Date.now());
     response.setHeader("Set-Cookie", `photon_setup=${issuedAt}.${signature(issuedAt)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400${publicUrl().startsWith("https://") ? "; Secure" : ""}`);
     response.redirect("/setup");
@@ -183,7 +212,7 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
       const config = await saveConfig({
         assistantName: body.assistantName, ownerName: body.ownerName, timezone: body.timezone,
         photonProjectId: body.photonProjectId, photonProjectSecret: body.photonProjectSecret || existing?.photonProjectSecret,
-        openaiApiKey: body.openaiApiKey || existing?.openaiApiKey, model: body.model,
+        openaiApiKey: body.openaiApiKey || existing?.openaiApiKey || (body.openaiBaseUrl?.trim() ? "local" : undefined), model: body.model,
         openaiBaseUrl: body.openaiBaseUrl?.trim() || undefined,
         granolaApiKey: body.granolaApiKey || existing?.granolaApiKey || undefined,
         google: {
@@ -207,7 +236,7 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
           : outcome.reason === "already-running"
             ? "Saved. Restart the app to apply these settings."
             : `Saved, but the assistant could not start: ${outcome.message}`;
-      response.send(setup(config, message, undefined, await ownerView()));
+      response.send(setup(config, message, undefined, await ownerView(config)));
     } catch (error) {
       const message = error instanceof ZodError ? error.issues.map((issue) => issue.message).join(" ") : error instanceof Error ? error.message : "Setup failed.";
       response.status(400).send(await render(message));
@@ -220,6 +249,8 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
       openaiApiKey: config.openaiApiKey,
       model: config.model,
       openaiBaseUrl: config.openaiBaseUrl,
+      photonProjectId: config.photonProjectId,
+      photonProjectSecret: config.photonProjectSecret,
       granolaApiKey: config.granolaApiKey,
       google: config.google.refreshToken
         ? { ...resolveGoogleClient(config.google), refreshToken: config.google.refreshToken }

@@ -6,7 +6,7 @@ import { builtInPlugins } from "./builtin-plugin.js";
 import { loadCommunityPlugins } from "./community-plugins.js";
 import { admitGuestMessage, firstContactDisclosure, recordGuestUsage, releaseGuestReservation, resetGuestReservations } from "./guests.js";
 import { createMessageProcessor, inboundMessageText, senderRuns } from "./message-pipeline.js";
-import { recordOwnerSpace, redeemClaimCode, resolveSenderRole } from "./owners.js";
+import { activeClaimCode, CLAIM_CODE_TTL_MS, hasVerifiedOwner, issueClaimCode, recordOwnerSpace, redeemClaimCode, resolveSenderRole } from "./owners.js";
 import { consumeActionConfirmation } from "./pending-confirmations.js";
 import { consumePendingEmailConfirmation, getPendingEmail, markPendingEmailReviewed } from "./pending-emails.js";
 import { emailAlertStore, startEmailAlertScheduler } from "./email-alerts.js";
@@ -204,6 +204,10 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
 
   console.log(`${settings.assistantName} is connected and awaiting iMessages.`, { model: settings.model, provider: kind });
   markAgentStarted();
+  if (!await hasVerifiedOwner()) {
+    const claim = await activeClaimCode() ?? await issueClaimCode();
+    console.log(`\nNo verified owner yet. Text this code to your Pingu number within ${Math.round(CLAIM_CODE_TTL_MS / 60_000)} minutes to become the owner:\n\n  ${claim.code}\n`);
+  }
   // Batches are keyed by space so one chat's transcript is never written by two
   // turns at once, and split by sender so nobody inherits another person's role.
   const messageQueue = new KeyedBatchQueue<{ space: Space; message: Message }>(1_500, async (_spaceId, entries) => {

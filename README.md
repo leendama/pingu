@@ -56,18 +56,14 @@ You need Node.js 22 or newer, a [Photon](https://app.photon.codes) project with 
 
 ```sh
 npm install
-cp .env.example .env    # add PROJECT_ID, PROJECT_SECRET, OPENAI_API_KEY
-npm run connect:google  # Google's consent screen, using Pingu's own app registration
 npm run start
 ```
 
-Then prove you are the owner:
+With nothing configured, `npm run start` opens the setup wizard and prints a one-time link that signs you in. The wizard is one screen: your Photon project ID and secret, a model (a running Ollama or LM Studio is found and preselected, otherwise paste an OpenAI key), and **Connect Google**, which is only Google's consent screen when a release ships Pingu's own app registration. **Test connections** checks each one, including that Photon accepts the credentials.
 
-```sh
-npm run claim           # prints a code such as PINGU-4F7K2Q
-```
+The last screen shows a claim code. Text it to your Pingu number from your own phone within an hour. That number is recorded as the owner by the exact id the platform reports, private tools switch on in that chat, and the page flips to "Pingu is ready" when the first reply lands. Until someone claims, every sender is a guest. The same code is printed in the log at start whenever nobody owns Pingu yet, and `npm run claim` prints a fresh one.
 
-Text that code to your Pingu number from your own phone within an hour. That number is recorded as the owner by the exact id the platform reports, and private tools switch on in that chat. Until someone claims, every sender is a guest.
+Prefer a `.env` file? Copy `.env.example`, add `PROJECT_ID`, `PROJECT_SECRET`, and `OPENAI_API_KEY`, run `npm run connect:google`, then `npm run start`; the wizard is skipped.
 
 For an always-on host, `docker compose up -d` and the browser wizard at `/setup` do the same job, including the claim code. Releases ship Pingu's own Google app, so there is no Google Cloud project to create; Google shows an "unverified app" notice once. Prefer your own project, or running the wizard on a remote host? [docs/SETUP.md](docs/SETUP.md) walks through it, with the one warning that catches most people: an OAuth app left in **Testing** issues sign-ins that expire after seven days.
 

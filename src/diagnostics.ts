@@ -1,7 +1,10 @@
+import { imessage } from "@spectrum-ts/imessage";
+import { Spectrum } from "spectrum-ts";
 import { googleClient, googleGrantedScopes, googleScopes } from "./google.js";
 import { granolaPort } from "./granola.js";
 import { createModelClient, describeCapabilities, probeProvider, providerKind, providerProbes, providerReady, type ProviderCapabilities } from "./provider.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
+import { runtimeStatus } from "./runtime-status.js";
 
 export type CheckStatus = "ok" | "failed" | "skipped";
 
@@ -20,6 +23,8 @@ export interface DiagnosticsInput {
   openaiBaseUrl?: string;
   granolaApiKey?: string;
   google?: RuntimeSettings["google"];
+  photonProjectId?: string;
+  photonProjectSecret?: string;
 }
 
 export interface DiagnosticsProbes {
@@ -30,6 +35,10 @@ export interface DiagnosticsProbes {
   /** Prove the Calendar API answers for the primary calendar. */
   googleCalendar(google: RuntimeSettings["google"]): Promise<void>;
   granola(apiKey: string): Promise<void>;
+  /** Connect to Photon with the project credentials once, then disconnect. */
+  photon(projectId: string, projectSecret: string): Promise<void>;
+  /** Whether the assistant is already connected in this process, which proves the credentials without a second connection. */
+  agentRunning?(): boolean;
 }
 
 const productionProbes: DiagnosticsProbes = {
@@ -46,6 +55,11 @@ const productionProbes: DiagnosticsProbes = {
   granola: async (apiKey) => {
     await granolaPort(apiKey).listNotes({ pageSize: 1 });
   },
+  photon: async (projectId, projectSecret) => {
+    const app = await Spectrum({ projectId, projectSecret, providers: [imessage.config()], telemetry: false });
+    await app.stop();
+  },
+  agentRunning: () => Boolean(runtimeStatus().startedAt),
 };
 
 function errorText(error: unknown): string {
@@ -122,22 +136,32 @@ async function checkGranola(input: DiagnosticsInput, probes: DiagnosticsProbes):
   }
 }
 
+async function checkPhoton(input: DiagnosticsInput, probes: DiagnosticsProbes): Promise<ConnectionCheck> {
+  const label = "Photon (iMessage)";
+  if (!input.photonProjectId || !input.photonProjectSecret) {
+    return { name: "photon", label, status: "skipped", detail: "Save the Photon project ID and secret first." };
+  }
+  if (probes.agentRunning?.()) {
+    return { name: "photon", label, status: "ok", detail: "The assistant is connected to Photon. Attach an iMessage line at app.photon.codes if you have not; the final proof is Pingu replying to your text." };
+  }
+  try {
+    await probes.photon(input.photonProjectId, input.photonProjectSecret);
+    return { name: "photon", label, status: "ok", detail: "Photon accepted the project credentials. Attach an iMessage line to this project at app.photon.codes; the final proof is Pingu replying to your text." };
+  } catch (error) {
+    return { name: "photon", label, status: "failed", detail: `Photon rejected the connection: ${errorText(error)}. Check PROJECT_ID and PROJECT_SECRET at app.photon.codes.` };
+  }
+}
+
 /**
  * Test every connection that can be probed without side effects, and say in
- * plain language what is wrong with any that fail. Photon credentials cannot
- * be probed statically — they are verified when the assistant starts, and
- * proven end to end by Pingu replying to a real text.
+ * plain language what is wrong with any that fail. Whether an iMessage line is
+ * attached cannot be read from here; Pingu replying to a real text is the proof.
  */
 export async function runDiagnostics(input: DiagnosticsInput, probes: DiagnosticsProbes = productionProbes): Promise<ConnectionCheck[]> {
   return [
     await checkProvider(input, probes),
     await checkGoogle(input, probes),
     await checkGranola(input, probes),
-    {
-      name: "photon",
-      label: "Photon (iMessage)",
-      status: "skipped",
-      detail: "Verified when the assistant starts — a startup failure reports its reason. The final proof is Pingu replying to your text.",
-    },
+    await checkPhoton(input, probes),
   ];
 }

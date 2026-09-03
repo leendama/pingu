@@ -22,6 +22,10 @@ Pingu can handle:
 - Threaded group replies (Photon premium needed)
 - Group controls (Photon premium needed)
 
+## Waitlist page
+
+`site/` is a static landing page styled as an iMessage thread. Emails go to a Google Sheet through Apps Script; see `site/apps-script/README.md` for the one-time setup. Pushes to `main` that touch `site/` deploy it to GitHub Pages.
+
 ## Set it up
 
 You need Node.js 22 or newer.

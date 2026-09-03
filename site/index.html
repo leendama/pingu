@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Pingu</title>
+  <meta name="description" content="Pingu, personal assistant on iMessage">
+  <meta property="og:title" content="Pingu">
+  <meta property="og:description" content="Pingu, personal assistant on iMessage">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://leendama.github.io/pingu/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="theme-color" content="#f6f6f6" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="pingu.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="pingu.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="phone">
+    <header class="bar">
+      <img class="avatar" src="pingu.svg" alt="" width="50" height="50">
+      <div class="name">Pingu<span class="chevron" aria-hidden="true">›</span></div>
+    </header>
+
+    <main class="thread" id="thread" role="log" aria-live="polite" aria-label="Conversation with Pingu">
+      <p class="stamp" id="stamp">Today</p>
+    </main>
+
+    <form class="compose" id="compose" novalidate>
+      <label class="sr-only" for="email">Email</label>
+      <input id="email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="iMessage" required>
+      <input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+      <button class="send" id="send" type="submit" aria-label="Send" disabled>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 19V6M6 12l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </form>
+
+    <noscript>
+      <div class="noscript">
+        <p>Pingu, personal assistant on iMessage</p>
+        <p>Self-hosted, open source</p>
+        <p>Google Calendar, Gmail, Granola, and others</p>
+        <p>Other people can text it to book time in your calendar</p>
+        <p>Reminders, polls, rich links, voice replies, tapbacks</p>
+        <p>Turn on JavaScript to join the waitlist</p>
+      </div>
+    </noscript>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

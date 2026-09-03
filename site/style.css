@@ -2,7 +2,6 @@
 
 :root {
   color-scheme: light dark;
-  --ground: #f2f2f7;
   --chat: #ffffff;
   --bar: rgba(249, 249, 249, 0.94);
   --line: #d9d9de;
@@ -14,12 +13,13 @@
   --out-ink: #ffffff;
   --red: #ff3b30;
   --field: #ffffff;
+  --col: 460px;
+  --gutter: 14px;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --ground: #18181b;
     --chat: #000000;
     --bar: rgba(28, 28, 30, 0.94);
     --line: #2c2c2e;
@@ -37,7 +37,7 @@ html, body { height: 100%; }
 
 body {
   margin: 0;
-  background: var(--ground);
+  background: var(--chat);
   color: var(--ink);
   font-family: var(--font);
   -webkit-text-size-adjust: 100%;
@@ -48,24 +48,7 @@ body {
   display: flex;
   flex-direction: column;
   height: 100dvh;
-  max-width: 430px;
-  margin: 0 auto;
   background: var(--chat);
-}
-
-@media (min-width: 600px) and (min-height: 600px) {
-  body { display: grid; place-items: center; }
-  .phone {
-    height: min(860px, calc(100dvh - 48px));
-    border: 1px solid var(--line);
-    border-radius: 28px;
-    overflow: hidden;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.12);
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .phone { box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5); }
-  }
 }
 
 /* Top bar */
@@ -108,7 +91,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 10px 14px 12px;
+  padding: 10px 0 12px;
+  padding-inline: max(var(--gutter), calc((100% - var(--col)) / 2));
   scroll-behavior: smooth;
 }
 
@@ -241,7 +225,8 @@ body {
   position: relative;
   display: flex;
   align-items: center;
-  padding: 6px 12px calc(10px + env(safe-area-inset-bottom));
+  padding: 6px 0 calc(10px + env(safe-area-inset-bottom));
+  padding-inline: max(var(--gutter), calc((100% - var(--col)) / 2));
   border-top: 1px solid var(--line);
   background: var(--bar);
   -webkit-backdrop-filter: blur(20px);
@@ -276,7 +261,7 @@ body {
 
 .send {
   position: absolute;
-  right: 17px;
+  right: calc(max(var(--gutter), calc((100% - var(--col)) / 2)) + 5px);
   top: 10px;
   width: 28px;
   height: 28px;

@@ -45,12 +45,11 @@ Star counts are as of 2026-09-03.
 | 6 | **Hyprnote** (`fastrepl`) | Local-first meeting notepad | ~2025-01-17 | PH 2025-04-18 | 3 months | 9,200 | MIT + commercial |
 | 7 | **Immich** (`immich-app`) | Self-hosted photo library | 2022-02-03 | r/selfhosted, 2022 | weeks | 113,317 | AGPL-3.0 |
 | 8 | **Karakeep** (was Hoarder) | Self-hosted bookmark-everything | 2024-02-06 | r/selfhosted 2024-03-26 | 7 weeks | 28,753 | AGPL-3.0 |
-| 9 | **Omi** (`BasedHardware/omi`) | Wearable "second brain" | — | — `not found` | — | — | — |
-| 10 | **Maybe Finance** | Self-hosted personal finance | — | — `not found` | — | — | — |
+| 9 | **Omi** (`BasedHardware/omi`) | Open-source AI wearable + app | 2024-03-22 | X, **day 0** (hackathon) | 0 days | 13,378 | MIT |
+| 10 | **Maybe Finance** | Self-hosted personal finance | 2024-01-10 | X + GitHub Trending, **days 0–5** | 0 days | 54,301 | AGPL-3.0 |
 
-Rows 9 and 10 are thin: the research pass covering them was still running when this document was
-written, so only their positioning language (Section 4) is used. They do not carry any conclusion
-on their own.
+Rows 9 and 10 are the instructive exceptions, and Section 2 treats them as such: both launched on
+day zero and both worked. Neither route is available to Pingu, for the reasons stated there.
 
 ### The iMessage-adjacent cohort
 
@@ -75,8 +74,9 @@ Not part of the ten, but the closest competitive reference points for Pingu spec
 
 ## 2. Pattern map — cadence
 
-**The launch is never the beginning; it is the third or fourth event.** Every project in the set
-shipped a runnable artefact, then released repeatedly, and only then posted anywhere.
+**For eight of the ten, the launch is not the beginning; it is the third or fourth event.** Those
+eight shipped a runnable artefact, released repeatedly, and only then posted anywhere. The two
+exceptions are treated below, and neither is reproducible here.
 
 | Project | Runnable artefact | Releases before launch |
 |---|---|---|
@@ -93,6 +93,23 @@ one every 4–5 days for years. Karakeep: 9 releases in the 4 weeks after launch
 monthly release-note posts. Screenpipe: 10 releases on a single day (2025-02-04). Jan: every 1–2
 weeks for its first four months. Nobody in this set launched and then went quiet.
 
+**The two exceptions launched on day zero — and both had bought the build-up another way.**
+
+- **Maybe Finance** pushed its code public on 2024-01-10 with one tweet: *"Here's what $1,000,000
+  worth of fintech software looks like…"*, framed as *"Maybe is dead, but here's the code if
+  anyone wants it."* It was **#1 on GitHub Trending by 2024-01-15, adding over 15,000 stars that
+  week**, raised ~$1.1–1.5M within about four weeks — and posted a Show HN only **sixteen months
+  later** (2025-05-04). At 54,301 stars it is the second-highest in the set.
+- **Omi** was built in 24 hours at a Mistral × Cerebral Valley hackathon and tweeted the same day
+  (2024-03-22), with an anti-incumbent hook: *"another 'open-source' AI wearable that has not
+  published anything just to charge you 5x the cost… we built FRIEND… Costs ~$20."*
+
+Neither skipped the build-up so much as substitute for it: a founder with a large existing X
+audience (Baremetrics) plus a "$1M of code, free" hook in one case; a live hackathon audience and
+a published bill of materials undercutting a funded competitor in the other. **Pingu has neither**,
+so the eight-project pattern is the one that applies. What these two do confirm is the value of a
+single concrete, quotable hook — Section 4.
+
 **Nobody launched everywhere at once, and nobody launched only once.**
 
 - Screenpipe: HN + PH on the **same day** (2024-09-30), then PH again ~16 months later
@@ -103,6 +120,11 @@ weeks for its first four months. Nobody in this set launched and then went quiet
   upvotes, #3) → HN again (Mar). Roughly **4–6 weeks between touches**, each pegged to a release.
 - Karakeep: Reddit + HN in the same week (Mar 2024) → **HN again 9 months later** (Dec 2024) →
   10k-star release two weeks after that.
+- Omi: hackathon tweet (day 0) → Kickstarter (+34d, **712 backers, $49,868 against a $5,000
+  goal**) → PH 2024-07-26 (**723 upvotes, #1 Product of the Day**) → rebrand from Friend to Omi
+  (+139d) → Show HN (+154d) → CES (+292d) → PH again (2025-06-13) → two further HN posts → **another
+  PH launch going live today**, visible as a launch-day badge commit in the repo. One major beat
+  every 3–5 months, each pegged to a new SKU.
 - Khoj: a stranger's HN post in Jul 2023 went badly ("mere ChatGPT wrappers") → the makers' own
   **Show HN three weeks later** with a sharper angle ("chat offline… using Llama 2") went well.
 
@@ -121,6 +143,10 @@ newsletters (selfh.st picked up Karakeep within 10 days and covered four subsequ
 then homelab YouTube. **Neither used Product Hunt meaningfully** — Immich has a PH page it did not
 drive, Karakeep has none at all. These are the two highest-star-count projects in the set outside
 the AI-hype cohort. Product Hunt was not required for either.
+
+**Route C — the audience drop (Maybe, Omi).** The founder's own X post first, GitHub Trending
+doing the distribution, PH and HN arriving months later as secondary beats. This route spends an
+audience you already have; it does not build one. Recorded for completeness and ruled out for Pingu.
 
 **Route B — the AI-tool route (Jan, Screenpipe, Hyprnote, OpenClaw).** HN first (or HN and PH the
 same day), then PH within 2–6 weeks pegged to a stable release, then press and YouTube pull.
@@ -192,9 +218,17 @@ confused product; the team rewrote from scratch and rebranded to Char. Screenpip
 after launch**. Jan won by *narrowing* — from "Run your own AI" (Oct 2023) to "Own Your AI"
 (Dec 6) to "an open-source ChatGPT alternative that runs 100% offline" (Dec 21).
 
+**A hook is not the same as a description, and the day-zero launches won on hooks.** Maybe led
+with a number — *"what $1,000,000 worth of fintech software looks like"*; Omi led with a price
+comparison — *"$20, 24h battery, while others charge 5x and have published nothing."* Both are
+concrete, checkable and quotable in someone else's words, which is what makes them travel. Neither
+is a product description. Pingu's candidate hook is the setup cost against what it replaces: an
+assistant that answers in the app already on your phone, running on your own box, for the price of
+your own API key.
+
 Structurally, the winning line is: **[open-source / self-hosted] + [known product it replaces] +
 [where your data stays]**, in one sentence, identical across the GitHub description, README H1,
-HN title and PH tagline.
+HN title and PH tagline — with the hook carried alongside it, not folded into it.
 
 ---
 
@@ -209,7 +243,9 @@ What existed *before* the first launch post, in every case:
 2. **A one-command install.** `docker run -d -p 3000:8080 …` (Open WebUI), `docker compose up`
    (Karakeep, Immich), `npm install -g clawdbot@latest && clawdbot onboard --install-daemon` then
    `curl -fsSL https://openclaw.ai/install.sh | bash` (OpenClaw), `brew install screenpipe`,
-   `brew tap fastrepl/hyprnote && brew install hyprnote --cask`.
+   `brew tap fastrepl/hyprnote && brew install hyprnote --cask`. Omi states the standard most
+   explicitly — `git clone … && ./run.sh --yolo`, advertised as *"No env files, no credentials, no
+   local backend."* That is the exact inverse of Pingu's current onboarding.
 3. **A Discord, linked from the README badge.** Universal. Khoj's makers: *"The Discord community
    has been OP… ample, active feedback."* OpenClaw's hit 8,900+ members within weeks.
 4. **A docs site separate from the README.** docs.khoj.dev, docs.screenpi.pe, docs.karakeep.app,
@@ -313,6 +349,10 @@ Nothing gets posted anywhere in this window. Deliverables:
       security model is genuinely better than OpenClaw's was at launch; that is a differentiator
       only if it is legible before the question is asked.
 - [ ] **Discord + `CONTRIBUTING.md` + 5–10 `good first issue` capability-plugin ideas.**
+- [ ] **A redaction-safe diagnostic bundle**, extending `npm run doctor`, plus a documented failure
+      mode per integration (Google, Granola, Photon). This is the Maybe Finance lesson in Section 9:
+      an assistant holding someone's calendar and inbox cannot be debugged from a stranger's report
+      unless you have built the way to ask.
 
 ### Phase 1 — Visible cadence, still no launch (Sep 14 – Sep 21)
 
@@ -460,6 +500,13 @@ Poke — VC-backed, in this exact category, with a distribution advantage Pingu 
 took **223 PH upvotes**. Usertour reached ~1,200 stars three months after a PH launch. Treating
 "top of HN" as the base case is how launches get called failures.
 
+The two big PH numbers in the set do not move these targets, because both were bought elsewhere.
+Omi's **723 upvotes and #1 Product of the Day** came 126 days after its repo opened, on the back of
+a completed Kickstarter (712 backers, $49,868), a same-day press release, and a giveaway of five
+physical devices. Maybe's 15,000 stars in a week came from a founder's audience and a $1M hook, not
+from a launch post. Neither is a target Pingu can plan toward on day one; both are what the second
+and third waves in Phase 5 are for.
+
 **What actually predicts the outcome**, in order: (1) whether `docker compose up` genuinely works
 for a stranger on the first try; (2) whether the demo video is watchable in 20 seconds; (3) whether
 the maker is in the comments for 12 hours; (4) whether the security answer is already written down.
@@ -469,6 +516,17 @@ Channel choice matters less than any of these.
 Khoj's Jul 2023 outcome, and their recovery was a *different, sharper* Show HN three weeks later
 ("chat offline… using Llama 2"), not a repost. Pingu's equivalent sharper angle is the Granola
 one: *"Show HN: Text your meeting notes — Granola recall over iMessage."* Hold it in reserve.
+
+**The failure mode to design against is Maybe's, not Poke's.** Maybe reached 54,301 stars and
+still archived the repo on 2025-07-27. Its v0.6.0 post-mortem names the cause: *"the single biggest
+challenge… is bank providers"* — a product whose core value sat behind third-party integrations it
+did not control — compounded by a privacy paradox, in that users of a personal-finance tool would
+not share data to reproduce bugs. **Pingu's dependency profile is the same shape**: Google, Granola
+and Photon for capability, and an assistant holding a user's calendar and inbox is exactly as hard
+to debug from a stranger's report. Two things follow, and both belong in the pre-launch window
+rather than after it: document each integration's failure mode so a broken provider degrades
+visibly instead of silently, and ship a redaction-safe diagnostic bundle (`npm run doctor` is the
+natural home) so a user can file a useful report without pasting their life into an issue.
 
 **The window is real and it is narrow.** OpenInstinct — self-hostable iMessage assistant — went
 from zero to 261 stars in nine days, having been created on 2026-08-25. Poke has left the
@@ -487,7 +545,9 @@ available today and will not be in six months.
 | README text at specific tags | `raw.githubusercontent.com` at pinned commits | Verified |
 | Star and fork counts (2026-09-03) | GitHub API | Verified |
 | Immich star milestones by date | The repo's own `roadmap.tsx` at v1.141.0 | Verified |
-| PH upvotes: Hyprnote 365, Jan 338, OpenClaw 758, Poke 223, Screenpipe 23/127 | Search snippets of blocked PH pages | Snippet only |
+| PH upvotes: Omi 723 (#1 POTD), Hyprnote 365, Jan 338, OpenClaw 758, Poke 223, Screenpipe 23/127 | Search snippets of blocked PH pages | Snippet only |
+| Omi and Maybe git history, tags, README evolution | Full local clones of both repos | Verified |
+| Omi Kickstarter (712 backers, $49,868); Maybe funding ~$1.1–1.5M | Search snippets; funding figure conflicts between sources | Snippet only |
 | HN post titles and IDs | Search snippets | Snippet only |
 | **All HN point counts** | — | **Not found** (HN blocked) |
 | **Nearly all Reddit titles and upvotes** | — | **Not found** (Reddit blocked) |
@@ -495,6 +555,9 @@ available today and will not be in six months.
 | PH mechanics (12:01 PT, vote weighting, 6-month relaunch, self-hunt rates) | `fmerian/awesome-product-hunt` launch guide/kit on GitHub | Verified |
 | HN star-gain averages | arXiv 2511.04453 + its companion repo | Verified |
 
-Rows 9 and 10 of the comparator set (Omi, Maybe Finance) are incomplete; a research pass covering
-them was still running when this was written. Their absence does not affect any conclusion above,
-each of which rests on at least four of the eight fully profiled projects.
+All ten comparators are now profiled. Omi and Maybe Finance were verified from full local clones
+of both repos (git log, tags, README history) plus the GitHub API; their Kickstarter totals, PH
+figures and funding amounts come from search snippets and are flagged as such above. Reported
+funding for Maybe conflicts between sources (~$1.1M vs ~$1.5M) and is given as a range.
+
+Every conclusion in Sections 2–5 rests on at least four independently verified projects.

@@ -3,7 +3,7 @@ import type { PinguPlugin } from "../plugins.js";
 import { capabilityPlugin, stringValue } from "../tools.js";
 
 export interface ReminderStore {
-  create(input: Omit<Reminder, "id" | "createdAt">): Promise<Reminder>;
+  create(input: Omit<Reminder, "id" | "createdAt">, options?: { maxForSender?: number }): Promise<Reminder>;
   list(spaceId: string, viewer: ReminderViewer): Promise<Reminder[]>;
   cancel(spaceId: string, reminderId: string, viewer: ReminderViewer): Promise<boolean>;
   countBySender(senderId: string): Promise<number>;
@@ -39,13 +39,11 @@ export function remindersPlugin(store: ReminderStore, options: { guestMaxReminde
           const recurrence = stringValue(args.recurrence) as ReminderRecurrence | undefined;
           const timezone = stringValue(args.timezone) ?? context.config.timezone;
           if (!text || !dueAt || !recurrence) throw new Error("Reminder text, due time, and recurrence are required.");
-          if (context.role === "guest") {
-            if (!context.senderId) throw new Error("I can't tell who is sending this message, so I can't keep a reminder for you.");
-            if (await store.countBySender(context.senderId) >= guestMax) {
-              throw new Error(`Guests can hold at most ${guestMax} active reminders. Cancel one first.`);
-            }
-          }
-          const reminder = await store.create({ spaceId: context.spaceId, text, dueAt, recurrence, timezone, creatorSenderId: context.senderId });
+          if (context.role === "guest" && !context.senderId) throw new Error("I can't tell who is sending this message, so I can't keep a reminder for you.");
+          const reminder = await store.create(
+            { spaceId: context.spaceId, text, dueAt, recurrence, timezone, creatorSenderId: context.senderId },
+            context.role === "guest" ? { maxForSender: guestMax } : {},
+          );
           return { output: JSON.stringify({ created: true, reminder }) };
         },
       },

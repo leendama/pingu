@@ -7,7 +7,9 @@ import { loadConfig, publicUrl, saveConfig, type AssistantConfig } from "./confi
 import { runDiagnostics, type ConnectionCheck } from "./diagnostics.js";
 import { googleOAuthClient, googleScopes } from "./google.js";
 import { activeClaimCode, CLAIM_CODE_TTL_MS, issueClaimCode, listOwners, removeOwner, type OwnerRecord } from "./owners.js";
+import { resolveGoogleClient } from "./runtime-settings.js";
 import { runtimeStatus } from "./runtime-status.js";
+import { isLoopbackUrl, sharedGoogleClient } from "./shared-google-client.js";
 import { deleteAllPinguData } from "./transcripts.js";
 
 function setupToken(): string {
@@ -62,6 +64,16 @@ function renderRuntime(config?: AssistantConfig): string {
     : `<p class="status">Pingu is running. Text your iMessage line — reload this page after it replies to confirm the whole chain works.</p>`;
 }
 
+function googleSection(config: AssistantConfig | undefined, callback: string): string {
+  const shared = sharedGoogleClient();
+  const ownFields = `<label>Client ID</label><input name="googleClientId" value="${escapeHtml(config?.google.clientId ?? "")}" ${shared ? "" : "required"}><label>Client secret</label><input type="password" name="googleClientSecret" placeholder="${config?.google.clientSecret ? "Leave blank to keep saved value" : ""}" ${shared || config?.google.clientSecret ? "" : "required"}>`;
+  if (!shared) {
+    return `<small>Create a Web OAuth client and add this authorised redirect URI:<br><code>${escapeHtml(callback)}</code><br>If the OAuth app stays in Testing, Google expires its sign-in after seven days; publish the app to keep Pingu connected.</small>${ownFields}`;
+  }
+  const loopback = isLoopbackUrl(publicUrl());
+  return `<small>Pingu ships its own Google app, so no Google Cloud project is needed: leave these blank and choose <b>Connect Google</b>. Google shows an "unverified app" screen once; choose Continue. ${loopback ? "" : `That only works when this page is opened on the machine running Pingu (a localhost address). This host is <code>${escapeHtml(publicUrl())}</code>, so enter your own Web OAuth client below with redirect URI <code>${escapeHtml(callback)}</code>.`}</small><details${config?.google.clientId ? " open" : ""}><summary>Use your own Google project instead</summary>${ownFields}</details>`;
+}
+
 interface OwnerView {
   owners: OwnerRecord[];
   claim?: { code: string; expiresAt: string };
@@ -90,7 +102,7 @@ function setup(config?: AssistantConfig, message = "", checks?: ConnectionCheck[
   <h2>Photon Spectrum</h2><label>Project ID</label><input name="photonProjectId" value="${escapeHtml(config?.photonProjectId)}" required><label>Project secret</label><input type="password" name="photonProjectSecret" placeholder="${config ? "Leave blank to keep saved value" : ""}" ${config ? "" : "required"}>
   <h2>Model</h2><label>API key</label><input type="password" name="openaiApiKey" placeholder="${config ? "Leave blank to keep saved value" : "sk-…"}" ${config ? "" : "required"}><label>Model</label><input name="model" value="${escapeHtml(config?.model || "gpt-5.6-luna")}" required>
   <label>Endpoint (optional)</label><input name="openaiBaseUrl" value="${escapeHtml(config?.openaiBaseUrl ?? "")}" placeholder="Leave blank for OpenAI, or e.g. http://host.docker.internal:11434/v1 for Ollama"><small>Works with OpenAI and tested OpenAI Responses-compatible endpoints that support function calling (Ollama, LM Studio). Inside Docker, <code>localhost</code> is the container; a model on your Mac is <code>host.docker.internal</code>. Voice replies need OpenAI.</small>
-  <h2>Google</h2><small>Create a Web OAuth client and add this authorised redirect URI:<br><code>${escapeHtml(callback)}</code><br>If the OAuth app stays in Testing, Google expires its sign-in after seven days; publish the app to keep Pingu connected.</small><label>Client ID</label><input name="googleClientId" value="${escapeHtml(config?.google.clientId)}" required><label>Client secret</label><input type="password" name="googleClientSecret" placeholder="${config ? "Leave blank to keep saved value" : ""}" ${config ? "" : "required"}>
+  <h2>Google</h2>${googleSection(config, callback)}
   <h2>Granola (optional)</h2><label>API key</label><input type="password" name="granolaApiKey" placeholder="${config ? "Leave blank to keep saved value" : ""}">
   <h2>Guests and bookings</h2><small>Anyone can text the number. Guests can chat, see your bookable windows, and request a meeting you approve by replying yes.</small>
   <label>Bookable hours</label><input name="bookableHours" value="${escapeHtml(config?.bookableHours ?? "09:00-17:00")}" placeholder="09:00-17:00 or 24h">
@@ -106,6 +118,15 @@ function setup(config?: AssistantConfig, message = "", checks?: ConnectionCheck[
   ${config ? `<form method="post" action="/setup/test"><button>Test connections</button></form>` : ""}
   ${owners ? renderOwners(owners) : ""}
   <h2>Delete all Pingu data</h2><small>Removes every chat transcript, reminder, alert, pending draft, guest record, verified owner, and booking request. Credentials stay so you are not signed out.</small><form method="post" action="/setup/data/delete"><label>Type DELETE to confirm</label><input name="confirm" autocomplete="off"><button class="danger">Delete data</button></form>`);
+}
+
+/** The client the wizard's OAuth flow uses. The shared installed-app client can only redirect to a loopback address. */
+function googleClientForWizard(config: AssistantConfig) {
+  const own = Boolean(config.google.clientId && config.google.clientSecret);
+  if (!own && !isLoopbackUrl(publicUrl())) {
+    throw new Error(`Pingu's shared Google app only works when the wizard is opened at a localhost address. This host is ${publicUrl()}; enter your own Google client ID and secret instead.`);
+  }
+  return resolveGoogleClient(config.google);
 }
 
 export function createSetupServer(onReady: (config: AssistantConfig) => Promise<StartOutcome>) {
@@ -165,7 +186,11 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
         openaiApiKey: body.openaiApiKey || existing?.openaiApiKey, model: body.model,
         openaiBaseUrl: body.openaiBaseUrl?.trim() || undefined,
         granolaApiKey: body.granolaApiKey || existing?.granolaApiKey || undefined,
-        google: { clientId: body.googleClientId, clientSecret: body.googleClientSecret || existing?.google.clientSecret, refreshToken: body.googleClientId === existing?.google.clientId ? existing?.google.refreshToken : undefined },
+        google: {
+          clientId: body.googleClientId?.trim() || undefined,
+          clientSecret: body.googleClientId?.trim() ? (body.googleClientSecret || existing?.google.clientSecret) : undefined,
+          refreshToken: (body.googleClientId?.trim() || "") === (existing?.google.clientId ?? "") ? existing?.google.refreshToken : undefined,
+        },
         telemetry: body.telemetry === "on",
         meetLink: body.meetLink === "on",
         guestDailyMessageCap: body.guestDailyMessageCap || undefined,
@@ -197,7 +222,7 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
       openaiBaseUrl: config.openaiBaseUrl,
       granolaApiKey: config.granolaApiKey,
       google: config.google.refreshToken
-        ? { clientId: config.google.clientId, clientSecret: config.google.clientSecret, refreshToken: config.google.refreshToken }
+        ? { ...resolveGoogleClient(config.google), refreshToken: config.google.refreshToken }
         : undefined,
     });
     response.send(await render("", checks));
@@ -220,10 +245,16 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
   app.get("/auth/google", async (_request, response) => {
     const config = await loadConfig();
     if (!config) return response.redirect("/setup");
+    let client;
+    try {
+      client = googleClientForWizard(config);
+    } catch (error) {
+      return response.status(400).send(await render(error instanceof Error ? error.message : "Google is not configured."));
+    }
     const timestamp = String(Date.now());
     const nonce = randomBytes(16).toString("base64url");
     const unsigned = `${timestamp}.${nonce}`;
-    const auth = googleOAuthClient(config.google, `${publicUrl()}/auth/google/callback`);
+    const auth = googleOAuthClient(client, `${publicUrl()}/auth/google/callback`);
     response.redirect(auth.generateAuthUrl({ access_type: "offline", prompt: "consent", scope: googleScopes, state: `${unsigned}.${signature(unsigned)}` }));
   });
   app.get("/auth/google/callback", async (request, response) => {
@@ -233,7 +264,7 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
       const [timestamp, nonce, supplied] = request.query.state.split(".");
       const unsigned = `${timestamp}.${nonce}`;
       if (!timestamp || !nonce || !supplied || Date.now() - Number(timestamp) > 600_000 || !safeEqual(supplied, signature(unsigned))) throw new Error("Google OAuth state is invalid or expired.");
-      const auth = googleOAuthClient(config.google, `${publicUrl()}/auth/google/callback`);
+      const auth = googleOAuthClient(googleClientForWizard(config), `${publicUrl()}/auth/google/callback`);
       const { tokens } = await auth.getToken(request.query.code);
       const refreshToken = tokens.refresh_token || config.google.refreshToken;
       if (!refreshToken) throw new Error("Google did not return a refresh token. Remove the app from Google account access and try again.");

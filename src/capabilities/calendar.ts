@@ -42,10 +42,16 @@ export function eventMismatches(event: CalendarEventData, expected: ExpectedEven
   if (expected.colorId !== undefined && (event.colorId ?? "") !== expected.colorId) mismatches.push("colour");
   if (expected.attendees) {
     const actual = new Set((Array.isArray(event.attendees) ? event.attendees as Array<{ email?: string | null; self?: boolean }> : [])
-      .filter((attendee) => attendee && !attendee.self)
-      .map((attendee) => attendee.email?.toLowerCase() ?? ""));
-    const missing = expected.attendees.filter((email) => !actual.has(email.toLowerCase()));
-    if (missing.length) mismatches.push(`attendees (${missing.join(", ")})`);
+      .filter((attendee) => attendee && !attendee.self && attendee.email)
+      .map((attendee) => attendee.email!.toLowerCase()));
+    const wanted = new Set(expected.attendees.map((email) => email.toLowerCase()));
+    const missing = [...wanted].filter((email) => !actual.has(email));
+    const unexpected = [...actual].filter((email) => !wanted.has(email));
+    const parts = [
+      ...(missing.length ? [`missing ${missing.join(", ")}`] : []),
+      ...(unexpected.length ? [`unexpected ${unexpected.join(", ")}`] : []),
+    ];
+    if (parts.length) mismatches.push(`attendees (${parts.join("; ")})`);
   }
   return mismatches;
 }
@@ -70,6 +76,7 @@ export interface CalendarEventData {
   colorId?: string | null;
   recurringEventId?: string | null;
   hangoutLink?: string | null;
+  extendedProperties?: { private?: Record<string, string> | null; shared?: Record<string, string> | null } | null;
 }
 
 export interface CalendarPort {
@@ -375,9 +382,20 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
   return { moved: prepared.length, deletedDuplicates: deleted.length };
 }
 
+/** Search results without text other people may have written; descriptions come only from read_calendar_event. */
+export function searchSummary(event: CalendarEventData): Omit<CalendarEventData, "description"> {
+  const { description: _description, ...rest } = event;
+  return rest;
+}
+
 export function calendarPlugin(port: CalendarPort): PinguPlugin {
   return capabilityPlugin(
-    { id: "calendar", name: "Google Calendar", description: "Search, create, move, recolour, edit, and delete events." },
+    {
+      id: "calendar",
+      name: "Google Calendar",
+      description: "Search, create, move, recolour, edit, and delete events.",
+      instructions: ["search_calendar omits event descriptions. Call read_calendar_event when the description or invitation text matters."],
+    },
     [
       {
         schema: {
@@ -431,7 +449,30 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
             timeMax: stringValue(args.time_max),
             query: stringValue(args.query),
           });
-          return { output: JSON.stringify({ events }) };
+          return { output: JSON.stringify({ events: events.map(searchSummary) }) };
+        },
+      },
+      {
+        schema: {
+          type: "function",
+          name: "read_calendar_event",
+          description: "Read one event in full, including its description, which may have been written by whoever sent the invitation. Use an ID from search_calendar.",
+          strict: true,
+          parameters: {
+            type: "object",
+            properties: { event_id: { type: "string", description: "Exact Google Calendar event ID returned by search_calendar." } },
+            required: ["event_id"],
+            additionalProperties: false,
+          },
+        },
+        sideEffecting: false,
+        untrustedSource: true,
+        run: async (args) => {
+          const eventId = stringValue(args.event_id);
+          if (!eventId) throw new Error("Event ID is required.");
+          const event = await port.getEvent(eventId);
+          if (!event) throw new Error(`Calendar event ${eventId} was not found.`);
+          return { output: JSON.stringify({ event }) };
         },
       },
       {

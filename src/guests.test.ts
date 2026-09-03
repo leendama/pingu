@@ -2,10 +2,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { admitGuestMessage, firstContactDisclosure, guestLimitMessage, guestTooLongMessage, guestUsageToday, recordGuestUsage, releaseGuestReservation } from "./guests.js";
+import { admitGuestMessage, firstContactDisclosure, guestLimitMessage, guestTooLongMessage, guestUsageToday, recordGuestUsage, releaseGuestReservation, resetGuestReservations } from "./guests.js";
 
 let directory: string;
-const settings = { dailyMessageCap: 2, dailyTokenBudget: 100, maxReminders: 5, maxInboundChars: 2000, maxTurnTokens: 30, maxToolRounds: 4 };
+const settings = { dailyMessageCap: 2, dailyTokenBudget: 100, maxReminders: 5, maxInboundChars: 2000, maxTurnTokens: 30, maxToolRounds: 4, maxOutputTokens: 500 };
 const day1 = Date.parse("2026-09-02T10:00:00Z");
 const day2 = Date.parse("2026-09-03T10:00:00Z");
 
@@ -36,9 +36,20 @@ describe("guest limits", () => {
     expect(await admitGuestMessage("g2", settings, { now: day2 })).toMatchObject({ allowed: true });
   });
 
-  it("counts every message in a burst against the sender's cap", async () => {
+  it("counts every message in a burst against the sender's cap and refuses a burst that would pass it", async () => {
     expect(await admitGuestMessage("g4", settings, { now: day1, messages: 2 })).toEqual({ allowed: true, firstContact: true, remaining: 0 });
     expect(await admitGuestMessage("g4", settings, { now: day1 })).toMatchObject({ allowed: false, reason: "sender-cap" });
+    expect(await admitGuestMessage("g5", settings, { now: day1 })).toMatchObject({ allowed: true, remaining: 1 });
+    expect(await admitGuestMessage("g5", settings, { now: day1, messages: 10 })).toMatchObject({ allowed: false, reason: "sender-cap" });
+    expect(await admitGuestMessage("g5", settings, { now: day1, messages: 1 })).toMatchObject({ allowed: true, remaining: 0 });
+  });
+
+  it("drops reservations left behind by a crash", async () => {
+    await admitGuestMessage("a", settings, { now: day1, reserveTokens: 90 });
+    expect(await admitGuestMessage("b", settings, { now: day1, reserveTokens: 30 })).toMatchObject({ allowed: false, reason: "budget" });
+    await resetGuestReservations();
+    expect(await guestUsageToday(day1)).toMatchObject({ reserved: 0 });
+    expect(await admitGuestMessage("b", settings, { now: day1, reserveTokens: 30 })).toMatchObject({ allowed: true });
   });
 
   it("reserves an estimated turn cost so simultaneous guests cannot overshoot the budget together", async () => {

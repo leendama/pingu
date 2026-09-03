@@ -1,6 +1,7 @@
 import type { AssistantConfig } from "./config.js";
 import { defaultGuestSettings, type GuestSettings } from "./guests.js";
 import { defaultSchedulingSettings, parseBookableDays, parseBookableHours, type SchedulingSettings } from "./scheduling-settings.js";
+import { sharedGoogleClient, type GoogleClientCredentials } from "./shared-google-client.js";
 import { defaultTranscriptSettings, type TranscriptSettings } from "./transcripts.js";
 
 export interface RuntimeSettings {
@@ -45,8 +46,17 @@ function envFlag(name: string, fallback: boolean): boolean {
   throw new Error(`${name} must be true or false.`);
 }
 
+/** The person's own Google client when they entered one, otherwise Pingu's shared registration. */
+export function resolveGoogleClient(own: { clientId?: string; clientSecret?: string }): GoogleClientCredentials {
+  if (own.clientId && own.clientSecret) return { clientId: own.clientId, clientSecret: own.clientSecret };
+  const shared = sharedGoogleClient();
+  if (!shared) throw new Error("No Google client is configured. Enter your own Google client ID and secret in the setup page.");
+  return shared;
+}
+
 export function settingsFromConfig(config: AssistantConfig, redirectUri?: string): RuntimeSettings {
   if (!config.google.refreshToken) throw new Error("Google must be connected before the assistant can start.");
+  const client = resolveGoogleClient(config.google);
   const hours = parseBookableHours(config.bookableHours);
   return {
     assistantName: config.assistantName,
@@ -59,8 +69,8 @@ export function settingsFromConfig(config: AssistantConfig, redirectUri?: string
     openaiBaseUrl: config.openaiBaseUrl || undefined,
     granolaApiKey: config.granolaApiKey,
     google: {
-      clientId: config.google.clientId,
-      clientSecret: config.google.clientSecret,
+      clientId: client.clientId,
+      clientSecret: client.clientSecret,
       refreshToken: config.google.refreshToken,
       redirectUri,
     },
@@ -111,6 +121,7 @@ export function settingsFromEnvironment(): RuntimeSettings {
       maxInboundChars: envNumber("PINGU_GUEST_MAX_INBOUND_CHARS", defaultGuestSettings.maxInboundChars, { min: 100, max: 50_000 }),
       maxTurnTokens: envNumber("PINGU_GUEST_MAX_TURN_TOKENS", defaultGuestSettings.maxTurnTokens, { min: 1000, max: 1_000_000 }),
       maxToolRounds: envNumber("PINGU_GUEST_MAX_TOOL_ROUNDS", defaultGuestSettings.maxToolRounds, { min: 0, max: 10 }),
+      maxOutputTokens: envNumber("PINGU_GUEST_MAX_OUTPUT_TOKENS", defaultGuestSettings.maxOutputTokens, { min: 100, max: 50_000 }),
     },
     transcripts: {
       ...defaultTranscriptSettings,

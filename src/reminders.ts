@@ -36,7 +36,7 @@ const store = new JsonFileStore<Reminder[]>(
   (value) => Array.isArray(value) ? value as Reminder[] : [],
 );
 
-export async function createReminder(input: Omit<Reminder, "id" | "createdAt">): Promise<Reminder> {
+export async function createReminder(input: Omit<Reminder, "id" | "createdAt">, options: { maxForSender?: number } = {}): Promise<Reminder> {
   const due = new Date(input.dueAt);
   if (Number.isNaN(due.getTime())) throw new Error("Reminder due time must be a valid ISO 8601 date-time.");
   if (due.getTime() <= Date.now()) throw new Error("Reminder due time must be in the future.");
@@ -55,6 +55,11 @@ export async function createReminder(input: Omit<Reminder, "id" | "createdAt">):
     createdAt: new Date().toISOString(),
   };
   await store.update((reminders) => {
+    // The count and the insert share one transaction, so two chats cannot both slip under the cap.
+    if (options.maxForSender !== undefined && input.creatorSenderId) {
+      const held = reminders.filter((candidate) => candidate.creatorSenderId === input.creatorSenderId && !candidate.disabledAt).length;
+      if (held >= options.maxForSender) throw new Error(`Guests can hold at most ${options.maxForSender} active reminders. Cancel one first.`);
+    }
     reminders.push(reminder);
     return { result: undefined, changed: true };
   });

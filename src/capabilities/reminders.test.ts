@@ -58,4 +58,12 @@ describe("reminders and identity", () => {
     expect(await listReminders("dm", { role: "guest", senderId: "g" })).toEqual([]);
     expect((await listReminders("dm", { role: "owner", senderId: "o" })).map((reminder) => reminder.id)).toEqual([legacy.id]);
   });
+
+  it("enforces the sender cap inside the same transaction as the insert", async () => {
+    await expect(Promise.all([
+      createReminder({ spaceId: "a", text: "1", dueAt: due, recurrence: "none", timezone: "UTC", creatorSenderId: "racer" }, { maxForSender: 1 }),
+      createReminder({ spaceId: "b", text: "2", dueAt: due, recurrence: "none", timezone: "UTC", creatorSenderId: "racer" }, { maxForSender: 1 }),
+    ])).rejects.toThrow(/at most 1/);
+    expect(await countRemindersBySender("racer")).toBe(1);
+  });
 });

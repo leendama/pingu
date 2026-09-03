@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Response, ResponseInputItem } from "openai/resources/responses/responses";
 import type { ToolRunContext } from "./plugins.js";
-import { createReplyGenerator, mayReplayResponseFailure } from "./reply-generator.js";
+import { TurnBudgetExceededError, createReplyGenerator, estimateTokens, mayReplayResponseFailure } from "./reply-generator.js";
 
 function textResponse(text: string, tokens = 10): Response {
   return {
@@ -180,5 +180,30 @@ describe("createReplyGenerator", () => {
     const { generate } = makeGenerator(looping, { maxToolRounds: (context: ToolRunContext) => context.role === "guest" ? 1 : 6, errorStatus: () => undefined });
     const guest = { ...freshContext(), role: "guest" as const };
     await expect(generate("chat", "hello", guest)).rejects.toThrow("exceeded the tool-call limit");
+  });
+
+  it("stops sending requests once the turn's token ceiling is in reach", async () => {
+    const onUsage = vi.fn();
+    const looping = Array.from({ length: 5 }, (_, index) => toolCallResponse("get_current_time", `call-${index}`));
+    const { generate, respond } = makeGenerator(looping, { onUsage, turnTokenBudget: () => 60, errorStatus: () => undefined });
+    await expect(generate("chat", "hello", freshContext())).rejects.toBeInstanceOf(TurnBudgetExceededError);
+    // Each round adds a call and its output to the input; by the third request the estimate plus tokens used passes 60.
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(onUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses a first request whose history alone exceeds the ceiling", async () => {
+    const history: ResponseInputItem[] = [{ type: "message", role: "user", content: "x".repeat(400) }];
+    const { generate, respond } = makeGenerator([textResponse("hi")], { turnTokenBudget: () => 50 }, history);
+    await expect(generate("chat", "hello", freshContext())).rejects.toBeInstanceOf(TurnBudgetExceededError);
+    expect(respond).not.toHaveBeenCalled();
+    expect(estimateTokens(history)).toBeGreaterThan(50);
+  });
+
+  it("reads history with the turn's context so guests can get a shorter one", async () => {
+    const { generate, transcripts } = makeGenerator([textResponse("hi")]);
+    const context = { ...freshContext(), role: "guest" as const };
+    await generate("chat", "hello", context);
+    expect(transcripts.read).toHaveBeenCalledWith("chat", context);
   });
 });

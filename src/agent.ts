@@ -4,8 +4,8 @@ import { markdown, Spectrum } from "spectrum-ts";
 import type { Message, Space } from "spectrum-ts";
 import { builtInPlugins } from "./builtin-plugin.js";
 import { loadCommunityPlugins } from "./community-plugins.js";
-import { admitGuestMessage, firstContactDisclosure, recordGuestUsage, releaseGuestReservation } from "./guests.js";
-import { createMessageProcessor, inboundMessageText } from "./message-pipeline.js";
+import { admitGuestMessage, firstContactDisclosure, recordGuestUsage, releaseGuestReservation, resetGuestReservations } from "./guests.js";
+import { createMessageProcessor, inboundMessageText, senderRuns } from "./message-pipeline.js";
 import { recordOwnerSpace, redeemClaimCode, resolveSenderRole } from "./owners.js";
 import { consumeActionConfirmation } from "./pending-confirmations.js";
 import { consumePendingEmailConfirmation, getPendingEmail, markPendingEmailReviewed } from "./pending-emails.js";
@@ -68,6 +68,15 @@ export function turnInstructions(settings: RuntimeSettings, audience: Pick<ToolR
   return `You are talking to ${settings.ownerName}, the verified owner, in a direct message.`;
 }
 
+/** History limits for a guest turn: enough for a scheduling conversation, small enough to fit the turn ceiling. */
+export function guestTranscriptSettings(settings: RuntimeSettings) {
+  return {
+    ...settings.transcripts,
+    maxEntries: Math.min(settings.transcripts.maxEntries, 30),
+    maxChars: Math.min(settings.transcripts.maxChars, Math.floor(settings.guest.maxTurnTokens * 4 * 0.6)),
+  };
+}
+
 export interface RunningAgent {
   done: Promise<void>;
   stop(): Promise<void>;
@@ -93,6 +102,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   }
   console.log("Model endpoint checked:", describeCapabilities(capabilities));
   await retireHostedConversations();
+  await resetGuestReservations();
 
   // Spectrum is needed to deliver owner approvals and guest notices; connect first.
   const app = await Spectrum({
@@ -125,16 +135,19 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       instructions: `${instructions}\n${turnInstructions(settings, context)}`,
       input,
       tools: registry.toolsFor(context),
+      ...(context.role === "guest" ? { max_output_tokens: settings.guest.maxOutputTokens } : {}),
       ...(capabilities.reasoningParameters ? { reasoning: { effort: "low" }, text: { verbosity: "low" } } : {}),
       ...(kind === "openai" ? { store: false, include: ["reasoning.encrypted_content"] } : {}),
     }),
     transcripts: {
-      read: (spaceId) => readTranscript(spaceId, settings.transcripts),
+      // Guests carry a shorter history so a turn's input stays inside its token ceiling.
+      read: (spaceId, context) => readTranscript(spaceId, context.role === "guest" ? guestTranscriptSettings(settings) : settings.transcripts),
       append: (spaceId, items) => appendTranscript(spaceId, items, settings.transcripts),
       forget: forgetTranscript,
     },
     keepReasoning: kind === "openai",
     maxToolRounds: (context) => context.role === "guest" ? settings.guest.maxToolRounds : 6,
+    turnTokenBudget: (context) => context.role === "guest" ? settings.guest.maxTurnTokens : undefined,
     runTool: (name, argumentsJson, context) => registry.run(name, argumentsJson, context),
     onUsage: (usage, context) => context.role === "guest" ? recordGuestUsage(usage.totalTokens) : undefined,
   });
@@ -191,10 +204,14 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
 
   console.log(`${settings.assistantName} is connected and awaiting iMessages.`, { model: settings.model, provider: kind });
   markAgentStarted();
+  // Batches are keyed by space so one chat's transcript is never written by two
+  // turns at once, and split by sender so nobody inherits another person's role.
   const messageQueue = new KeyedBatchQueue<{ space: Space; message: Message }>(1_500, async (_spaceId, entries) => {
     const latest = entries.at(-1);
     if (!latest) return;
-    await processMessage(latest.space, entries.map((entry) => entry.message));
+    for (const run of senderRuns(entries.map((entry) => entry.message))) {
+      await processMessage(latest.space, run);
+    }
   });
   let stopping = false;
   const done = (async () => {

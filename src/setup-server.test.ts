@@ -30,7 +30,7 @@ const servers: Server[] = [];
 
 afterEach(async () => {
   resetRuntimeStatus();
-  for (const name of ["PHOTON_DATA_DIR", "PHOTON_CONFIG_KEY", "PHOTON_SETUP_TOKEN", "PHOTON_PUBLIC_URL", "PINGU_OWNER_SENDER_IDS"]) delete process.env[name];
+  for (const name of ["PHOTON_DATA_DIR", "PHOTON_CONFIG_KEY", "PHOTON_SETUP_TOKEN", "PHOTON_PUBLIC_URL", "PINGU_OWNER_SENDER_IDS", "PINGU_SHARED_GOOGLE_CLIENT_ID", "PINGU_SHARED_GOOGLE_CLIENT_SECRET"]) delete process.env[name];
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
@@ -292,5 +292,44 @@ describe("saved settings", () => {
     });
     expect(response.status).toBe(400);
     expect(await response.text()).toContain("full http(s) URL");
+  });
+});
+
+describe("shared Google app", () => {
+  it("lets the person leave the Google client blank and connects through Pingu's registration on localhost", async () => {
+    process.env.PINGU_SHARED_GOOGLE_CLIENT_ID = "shared-client-id.apps.googleusercontent.com";
+    process.env.PINGU_SHARED_GOOGLE_CLIENT_SECRET = "shared-secret";
+    const { base } = await startServer(async () => ({ started: false, reason: "already-running" }));
+    const cookie = await loginCookie(base);
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("no Google Cloud project is needed");
+    const saved = await fetch(`${base}/setup/save`, { method: "POST", headers: { cookie }, body: saveBody({ googleClientId: "", googleClientSecret: "", photonProjectSecret: "photon-secret", openaiApiKey: "sk-0123456789012345678901234567" }) });
+    expect(saved.status).toBe(200);
+    expect(await saved.text()).toContain("Connect Google to finish.");
+    const { loadConfig } = await import("./config.js");
+    expect((await loadConfig())?.google.clientId).toBeUndefined();
+    const auth = await fetch(`${base}/auth/google`, { headers: { cookie }, redirect: "manual" });
+    expect(auth.status).toBe(302);
+  });
+
+  it("refuses the shared app on a non-localhost host and asks for an own client", async () => {
+    process.env.PINGU_SHARED_GOOGLE_CLIENT_ID = "shared-client-id.apps.googleusercontent.com";
+    process.env.PINGU_SHARED_GOOGLE_CLIENT_SECRET = "shared-secret";
+    const { base } = await startServer();
+    process.env.PHOTON_PUBLIC_URL = "https://pingu.example.com";
+    const cookie = await loginCookie(base);
+    await saveConfig({ ...savedConfig, google: { refreshToken: undefined } });
+    const auth = await fetch(`${base}/auth/google`, { headers: { cookie }, redirect: "manual" });
+    expect(auth.status).toBe(400);
+    expect(await auth.text()).toContain("only works when the wizard is opened at a localhost address");
+  });
+
+  it("still requires an own client when no shared app ships", async () => {
+    const { base } = await startServer();
+    const cookie = await loginCookie(base);
+    const response = await fetch(`${base}/setup/save`, { method: "POST", headers: { cookie }, body: saveBody({ googleClientId: "", googleClientSecret: "", photonProjectSecret: "s", openaiApiKey: "sk-0123456789012345678901234567" }) });
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("Create a Web OAuth client");
+    expect(response.status).toBe(200);
   });
 });

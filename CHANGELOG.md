@@ -41,6 +41,21 @@ First public release.
 - Transcript retention removes expired entries from disk on read and in a periodic cleanup, so quiet chats expire too.
 - Claim-code attempts are limited per sender per day.
 
+### Second review
+
+- Bursts are combined only for one sender, so a guest's message in a group can never inherit the owner's tools from a message that followed it.
+- The guest turn ceiling is enforced: no request is sent once tokens used plus the next request's estimate would pass it, replies are capped, guests get a shorter history, oversized bursts are refused outright, and reservations are cleared at startup.
+- Interrupted approvals are settled from Google: the event carries the request code and its id is saved the moment Google returns it, so recovery books or fails from what actually exists.
+- Every scheduling notice reports whether the other person was actually reached.
+- Transcript cleanup deletes an empty file under the same lock as the compaction, so a message appended meanwhile survives.
+- Reminder and pending-request caps are enforced inside the insert transaction.
+- Calendar search omits event descriptions; a new read_calendar_event tool returns them and is treated as third-party content.
+- Attendee verification checks both directions, so an unexpected extra attendee is a mismatch.
+
+### Google without a cloud console
+
+- Releases can ship Pingu's own Google app registration. `npm run connect:google` and the wizard on localhost then need no Google Cloud project: only Google's consent screen, with a one-time "unverified app" notice. Own clients still work, and are required for a wizard on a remote host.
+
 ### Setup
 
 - The wizard shows the claim code, lists verified owners, and has settings for the model endpoint, bookable hours, guest caps, retention, and telemetry.

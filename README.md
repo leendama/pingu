@@ -57,7 +57,7 @@ You need Node.js 22 or newer, a [Photon](https://app.photon.codes) project with 
 ```sh
 npm install
 cp .env.example .env    # add PROJECT_ID, PROJECT_SECRET, OPENAI_API_KEY
-npm run connect:google  # after creating a Google OAuth desktop client, see docs/SETUP.md
+npm run connect:google  # Google's consent screen, using Pingu's own app registration
 npm run start
 ```
 
@@ -69,7 +69,7 @@ npm run claim           # prints a code such as PINGU-4F7K2Q
 
 Text that code to your Pingu number from your own phone within an hour. That number is recorded as the owner by the exact id the platform reports, and private tools switch on in that chat. Until someone claims, every sender is a guest.
 
-For an always-on host, `docker compose up -d` and the browser wizard at `/setup` do the same job, including the claim code. [docs/SETUP.md](docs/SETUP.md) walks through Google Cloud with the one warning that catches most people: an OAuth app left in **Testing** issues sign-ins that expire after seven days. Publish it.
+For an always-on host, `docker compose up -d` and the browser wizard at `/setup` do the same job, including the claim code. Releases ship Pingu's own Google app, so there is no Google Cloud project to create; Google shows an "unverified app" notice once. Prefer your own project, or running the wizard on a remote host? [docs/SETUP.md](docs/SETUP.md) walks through it, with the one warning that catches most people: an OAuth app left in **Testing** issues sign-ins that expire after seven days.
 
 Check any setup with:
 
@@ -93,7 +93,7 @@ Anyone can text the number, so the limits matter:
 |---|---|---|
 | Messages per unknown sender per day, every message in a burst counted | 20 | `PINGU_GUEST_DAILY_MESSAGE_CAP` |
 | Model tokens all guests may use per day, reserved before each turn and counted per response | 300,000 | `PINGU_GUEST_DAILY_TOKEN_BUDGET` |
-| Tokens reserved per guest turn, longest guest text, tool rounds per guest turn | 20,000, 2,000 chars, 4 | `PINGU_GUEST_MAX_TURN_TOKENS`, `PINGU_GUEST_MAX_INBOUND_CHARS`, `PINGU_GUEST_MAX_TOOL_ROUNDS` |
+| Hard ceiling per guest turn, longest guest text, tool rounds and reply length per guest turn | 20,000 tokens, 2,000 chars, 4 rounds, 1,500 tokens | `PINGU_GUEST_MAX_TURN_TOKENS`, `PINGU_GUEST_MAX_INBOUND_CHARS`, `PINGU_GUEST_MAX_TOOL_ROUNDS`, `PINGU_GUEST_MAX_OUTPUT_TOKENS` |
 | Active reminders per guest, across all chats | 5 | `PINGU_GUEST_MAX_REMINDERS` |
 | Pending meeting requests per guest | 1 | fixed |
 | Bookable hours | 09:00 to 17:00 weekdays | `PINGU_BOOKABLE_HOURS`, `PINGU_BOOKABLE_DAYS` |

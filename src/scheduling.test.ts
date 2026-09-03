@@ -141,7 +141,7 @@ describe("request lifecycle", () => {
     const outcome = await scheduling.resolveOwnerReply({ message: reply, texts: ["yes"], spaceId: "owner-dm", senderId: "owner" });
     expect(outcome).toBe("Booked and invitation sent to sam@example.com. Meet link is on the event.");
     expect(calendar.inserts[0]).toMatchObject({ sendUpdates: "all", options: { conferenceDataVersion: 1 } });
-    expect(calendar.inserts[0]?.body).toMatchObject({ summary: "Call with Sam", attendees: [{ email: "sam@example.com" }] });
+    expect(calendar.inserts[0]?.body).toMatchObject({ summary: "Call with Sam", attendees: [{ email: "sam@example.com" }], extendedProperties: { private: { pinguRequest: submitted.request.code } } });
     expect(String(calendar.inserts[0]?.body.description)).toContain("unverified");
     const stored = (await requestStore.read()).requests[0]!;
     expect(stored).toMatchObject({ status: "booked", eventId: "evt-1", meetLink: "https://meet.google.com/abc-defg-hij" });
@@ -183,7 +183,7 @@ describe("request lifecycle", () => {
     let now = NOW;
     const { service: scheduling, send } = service(calendar, { now: () => now });
     const first = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
-    expect(await scheduling.decline(first.request.code)).toContain("Declined");
+    expect(await scheduling.decline(first.request.code)).toContain("Declined. Nothing was created. Sam has been told.");
     expect(send.mock.calls.at(-1)?.[1]).toContain("can't make that time");
 
     const second = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T14:00:00Z" });
@@ -273,7 +273,57 @@ describe("request lifecycle", () => {
     now = NOW + STALE_TRANSITION_MS + 1;
     await scheduling.recoverStale();
     expect((await requestStore.read()).requests[0]).toMatchObject({ status: "failed" });
-    expect(send.mock.calls.at(-2)?.[1]).toContain("interrupted");
+    expect(send.mock.calls.at(-2)?.[1]).toContain("interrupted by a restart");
+  });
+
+  it("settles an interrupted approval from the event Google actually created", async () => {
+    const calendar = fakeCalendar();
+    let now = NOW;
+    const { service: scheduling, send } = service(calendar, { now: () => now });
+    const { request } = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
+    // Simulate a crash after insert: the event exists, tagged with the code, but the request never left "approving".
+    await calendar.insertEvent({
+      summary: "Call with Sam", start: { dateTime: request.startIso, timeZone: "UTC" }, end: { dateTime: request.endIso, timeZone: "UTC" },
+      attendees: [{ email: guest.email }], extendedProperties: { private: { pinguRequest: request.code } },
+    }, "all", { conferenceDataVersion: 1 });
+    await requestStore.update((state) => {
+      state.requests[0]!.status = "approving";
+      state.requests[0]!.transitionAt = new Date(now).toISOString();
+      return { result: undefined, changed: true };
+    });
+    now = NOW + STALE_TRANSITION_MS + 1;
+    await scheduling.recoverStale();
+    expect((await requestStore.read()).requests[0]).toMatchObject({ status: "booked", eventId: "evt-1" });
+    expect(send.mock.calls.some((call) => String(call[1]).includes("Recovered after a restart"))).toBe(true);
+    expect(send.mock.calls.at(-1)?.[1]).toContain("Recovered after a restart");
+  });
+
+  it("marks an interrupted approval failed only when Google holds nothing for it", async () => {
+    const calendar = fakeCalendar();
+    let now = NOW;
+    const { service: scheduling } = service(calendar, { now: () => now });
+    const { request } = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
+    await requestStore.update((state) => { state.requests[0]!.status = "approving"; state.requests[0]!.transitionAt = new Date(now).toISOString(); return { result: undefined, changed: true }; });
+    now = NOW + STALE_TRANSITION_MS + 1;
+    await scheduling.recoverStale();
+    expect((await requestStore.read()).requests[0]).toMatchObject({ status: "failed", code: request.code });
+    expect((await requestStore.read()).requests[0]?.outcome).toContain("Nothing was booked");
+  });
+
+  it("says when the guest or owner could not be reached instead of claiming they were told", async () => {
+    const calendar = fakeCalendar();
+    const send = vi.fn(async (spaceId: string) => { if (spaceId === "guest-dm") throw new Error("unreachable"); });
+    const { service: scheduling } = service(calendar, { send });
+    const { request } = await scheduling.submitRequest({ ...guest, startIso: "2026-09-02T13:00:00Z" });
+    expect(await scheduling.decline(request.code)).toContain("couldn't reach Sam");
+
+    const ownerless = vi.fn(async (spaceId: string) => { if (spaceId === "owner-dm") throw new Error("unreachable"); });
+    const { service: second } = service(calendar, { send: ownerless, ownerSpaces: async () => ["owner-dm"] });
+    await requestStore.update((state) => { state.requests.push({ ...request, code: "PK-TEST", status: "booked", eventId: "evt-x" }); return { result: undefined, changed: true }; });
+    calendar.events.set("evt-x", { id: "evt-x" });
+    const outcome = await second.cancelGuestBooking(guest.guestSenderId, "PK-TEST");
+    expect(outcome).toContain("couldn't reach Alex");
+    expect(ownerless).toHaveBeenCalledWith("owner-dm", expect.stringContaining("cancelled"));
   });
 
   it("settles a stale cancellation from what the calendar actually holds", async () => {

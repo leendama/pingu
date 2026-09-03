@@ -68,10 +68,11 @@ describe("transcript files", () => {
     await forgetTranscript("space-a");
     expect(await readTranscript("space-a", settings, now)).toEqual([]);
     expect(await readTranscript("space-b", settings, now)).toEqual([user("other")]);
+    expect((await readdir(join(directory, "transcripts"))).length).toBe(1);
 
     await writeFile(join(directory, "reminders.json"), "[]");
     const result = await deleteAllPinguData();
-    expect(result.transcripts).toBe(2);
+    expect(result.transcripts).toBe(1);
     expect(result.files).toEqual(["reminders.json"]);
     expect(await readTranscript("space-b", settings, now)).toEqual([]);
   });
@@ -96,7 +97,7 @@ describe("transcript files", () => {
     await appendTranscript("active", [user("recent")], settings, now);
     await writeFile(join(directory, "transcripts", "stray.json"), "not json");
     const result = await cleanupTranscripts(settings, now);
-    expect(result).toEqual({ trimmed: 1, deleted: 2 });
+    expect(result).toEqual({ trimmed: 0, deleted: 2 });
     expect(await readdir(join(directory, "transcripts"))).toHaveLength(1);
     expect(await readTranscript("active", settings, now)).toEqual([user("recent")]);
   });

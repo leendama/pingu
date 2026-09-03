@@ -19,7 +19,7 @@ Files are written with owner-only permissions. Transcripts are trimmed to the re
 
 - **Photon.** Every iMessage in and out is relayed by Photon's service. Photon sees message text, sender ids, and chat ids. Spectrum SDK telemetry is off unless you turn it on.
 - **Your model provider.** Each turn sends the system instructions, the conversation transcript for that chat, and the results of any tools the model called. With OpenAI that includes calendar events, email bodies, or meeting notes the model asked for. Pingu sends OpenAI requests with `store: false`. With Ollama or LM Studio, that traffic stays on your hardware.
-- **Google.** Calendar and Gmail calls go to Google with your OAuth token.
+- **Google.** Calendar and Gmail calls go to Google with your OAuth token. When you connect through Pingu's shared Google app, that token is minted for Pingu's registration but stored only on your machine; nothing about your account reaches the maintainers.
 - **Granola.** Note reads go to Granola with your API key.
 
 Pingu itself has no server and collects nothing.

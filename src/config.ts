@@ -52,11 +52,12 @@ export const assistantConfigSchema = z.object({
   model: z.string().trim().min(1).default("gpt-5.6-luna"),
   openaiBaseUrl: optionalUrl,
   granolaApiKey: z.string().trim().optional(),
+  /** Own Google OAuth client. Both blank means Pingu's shared registration, when one ships. */
   google: z.object({
-    clientId: z.string().trim().min(8),
-    clientSecret: z.string().trim().min(4),
+    clientId: z.string().trim().optional(),
+    clientSecret: z.string().trim().optional(),
     refreshToken: z.string().optional(),
-  }),
+  }).refine((google) => Boolean(google.clientId) === Boolean(google.clientSecret), "Enter both the Google client ID and secret, or leave both blank to use Pingu's shared Google app."),
   telemetry: z.boolean().default(false),
   guestDailyMessageCap: z.coerce.number().int().min(1).max(500).default(20),
   transcriptRetentionDays: z.coerce.number().int().min(0).max(3650).default(30),

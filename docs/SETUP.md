@@ -32,6 +32,18 @@ Repeat from another device to verify a second handle. Remove a handle from the s
 
 ## Connect Google Calendar and Gmail
 
+Releases ship Pingu's own Google app registration, so the short path is:
+
+```bash
+npm run connect:google
+```
+
+Your browser opens Google's consent screen. Google shows an "unverified app" notice once; choose **Continue**. The token is saved in `data/google-token.json`. That is the whole step.
+
+The registration is unverified by choice, which means Google allows about a hundred people through it and shows that notice. If you would rather use your own Google Cloud project, or the shared app has hit its limit, follow the manual path below. In the browser wizard the shared app works only when you open the wizard at a localhost address, because Google's installed-app clients can only redirect to the machine running the app; on a remote host, enter your own client.
+
+### Manual path: your own Google project
+
 1. Open [Google Cloud](https://console.cloud.google.com) and create or pick a project.
 2. Enable the **Google Calendar API** and the **Gmail API**.
 3. Configure the OAuth consent screen. Add your own Google account as a test user.
@@ -153,6 +165,15 @@ Read the CHANGELOG entry first; a release notes any change to the data files. Th
 - **Hosted (wizard):** remove `PHOTON_DATA_DIR` or the `pingu-data` volume to drop the encrypted credentials too.
 - **Local (.env):** the data directory holds only the Google token. Delete `.env` and `credentials.json` yourself to remove the rest.
 - Ids in `PINGU_OWNER_SENDER_IDS` stay owners after any reset until you remove them from the environment.
+
+## For maintainers: registering the shared Google app
+
+1. In Google Cloud, create a project, enable the Calendar API and Gmail API, and configure the consent screen with the scopes Pingu requests.
+2. Create an OAuth client of type **Desktop**. Google treats desktop client secrets as public, which is why it may ship in a release.
+3. Set the app's publishing status to **In production** and leave it unverified.
+4. Put the client ID and secret into `src/shared-google-client.ts` before tagging, or set `PINGU_SHARED_GOOGLE_CLIENT_ID` and `PINGU_SHARED_GOOGLE_CLIENT_SECRET` in the release build.
+
+Verification, if wanted later, is free for calendar scopes and needs a CASA Tier 2 assessment for Gmail scopes.
 
 ## Connect Granola
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Message, Space } from "spectrum-ts";
 import type { PendingEmail } from "./pending-emails.js";
-import { combineInboundMessages, createMessageProcessor, inboundSenderId, spaceKind } from "./message-pipeline.js";
+import { combineInboundMessages, createMessageProcessor, inboundSenderId, senderRuns, spaceKind } from "./message-pipeline.js";
 
 const pending: PendingEmail = {
   spaceId: "chat",
@@ -251,6 +251,24 @@ describe("sender identity", () => {
   });
 });
 
+describe("mixed-sender batches", () => {
+  it("splits a batch into runs of one sender and never merges anonymous messages", () => {
+    const runs = senderRuns([inboundMessage("a", "g"), inboundMessage("b", "g"), inboundMessage("c", "owner-1"), inboundMessage("d", null), inboundMessage("e", null)]);
+    expect(runs.map((run) => run.length)).toEqual([2, 1, 1, 1]);
+  });
+
+  it("gives a guest's message in a group its own turn instead of the owner's role", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const space = { ...directSpace(), type: "group" } as unknown as Space;
+    await createMessageProcessor(deps)(space, [inboundMessage("remove sam from the group", "guest-1"), inboundMessage("what's the time?", "owner-1")]);
+    expect(deps.generateReply).toHaveBeenCalledTimes(2);
+    const roles = deps.generateReply.mock.calls.map((call) => (call[2] as { role: string; senderId?: string }));
+    expect(roles).toEqual([expect.objectContaining({ role: "guest", senderId: "guest-1" }), expect.objectContaining({ role: "owner", senderId: "owner-1" })]);
+    expect(deps.generateReply.mock.calls[0]?.[1]).not.toContain("what's the time");
+  });
+});
+
 describe("guest handling", () => {
   it("shows the disclosure once on first contact, then answers", async () => {
     const deps = dependencies();
@@ -291,6 +309,14 @@ describe("guest handling", () => {
     expect(await sentContentText(send, 0)).toContain("too long");
     expect(deps.generateReply).toHaveBeenCalledTimes(2);
     expect(releaseGuest).toHaveBeenCalledTimes(3);
+  });
+
+  it("tells a guest plainly when a turn would cost more than allowed", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockRejectedValue(Object.assign(new Error("budget"), { name: "TurnBudgetExceededError" }));
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor(deps)(directSpace(send), inboundMessage("long question", "guest-1"));
+    expect(await sentContentText(send, 0)).toContain("more than one guest turn is allowed to cost");
   });
 
   it("never counts the owner against guest limits", async () => {

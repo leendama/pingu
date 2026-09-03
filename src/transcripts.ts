@@ -122,18 +122,17 @@ export async function cleanupTranscripts(settings: TranscriptSettings, now = Dat
       deleted += 1;
       continue;
     }
+    // The empty check and the delete happen under the same per-file lock as the
+    // compaction, so a message appended meanwhile can never be swept away.
     const remaining = await storeFor(spaceId).update<number>((file) => {
       const compacted = compactEntries(file.entries, settings, now);
       const changed = compacted.length !== file.entries.length;
-      if (changed) trimmed += 1;
       file.entries = compacted;
+      if (compacted.length === 0) return { result: 0, changed, remove: true };
+      if (changed) trimmed += 1;
       return { result: compacted.length, changed };
     });
-    if (remaining === 0) {
-      await rm(join(directory, name), { force: true });
-      stores.delete(transcriptFilename(spaceId));
-      deleted += 1;
-    }
+    if (remaining === 0) deleted += 1;
   }
   return { trimmed, deleted };
 }
@@ -156,9 +155,8 @@ export async function appendTranscript(spaceId: string, items: ResponseInputItem
 
 export async function forgetTranscript(spaceId: string): Promise<void> {
   await storeFor(spaceId).update((file) => {
-    const changed = file.entries.length > 0;
     file.entries = [];
-    return { result: undefined, changed };
+    return { result: undefined, changed: true, remove: true };
   });
 }
 

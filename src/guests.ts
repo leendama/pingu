@@ -14,6 +14,8 @@ export interface GuestSettings {
   maxTurnTokens: number;
   /** Tool rounds a guest turn may take before Pingu gives up. */
   maxToolRounds: number;
+  /** Longest model reply a guest turn may produce, in tokens. Bounds the overshoot of one response. */
+  maxOutputTokens: number;
 }
 
 export const defaultGuestSettings: GuestSettings = {
@@ -23,6 +25,7 @@ export const defaultGuestSettings: GuestSettings = {
   maxInboundChars: 2_000,
   maxTurnTokens: 20_000,
   maxToolRounds: 4,
+  maxOutputTokens: 1_500,
 };
 
 interface GuestRecord {
@@ -85,7 +88,7 @@ export async function admitGuestMessage(senderId: string, settings: GuestSetting
       : { firstSeenAt: existing?.firstSeenAt ?? new Date(now).toISOString(), day, count: 0 };
     state.senders[senderId] = record;
     if (state.usage.day !== day) state.usage = { day, tokens: 0, reserved: 0 };
-    if (record.count >= settings.dailyMessageCap) {
+    if (record.count + messages > settings.dailyMessageCap) {
       return { result: { allowed: false, firstContact, reason: "sender-cap" }, changed: true };
     }
     if (state.usage.tokens + state.usage.reserved + reserve > settings.dailyTokenBudget) {
@@ -104,6 +107,15 @@ export async function releaseGuestReservation(reserveTokens: number, now = Date.
   await store.update((state) => {
     if (state.usage.day !== day) return { result: undefined, changed: false };
     state.usage.reserved = Math.max(0, state.usage.reserved - reserveTokens);
+    return { result: undefined, changed: true };
+  });
+}
+
+/** Reservations belong to turns in flight; after a crash none are, so drop them at startup. */
+export async function resetGuestReservations(): Promise<void> {
+  await store.update((state) => {
+    if (state.usage.reserved === 0) return { result: undefined, changed: false };
+    state.usage.reserved = 0;
     return { result: undefined, changed: true };
   });
 }

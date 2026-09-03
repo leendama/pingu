@@ -5,6 +5,7 @@ import { boundedGmailBody, type GmailPort } from "./capabilities/gmail.js";
 import type { JsonObject } from "./tools.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 import { googleCredentialsPath, googleTokenPath } from "./private-paths.js";
+import { ownCredentialsFileExists, sharedGoogleClient } from "./shared-google-client.js";
 
 export const googleScopes = [
   "https://www.googleapis.com/auth/calendar.events",
@@ -27,11 +28,18 @@ async function createGoogleAuth(credentials?: RuntimeSettings["google"]) {
   let redirectUri = credentials?.redirectUri;
   let token: Record<string, unknown> = { refresh_token: credentials?.refreshToken };
   if (!clientId || !clientSecret) {
-    const credentials = JSON.parse(await readFile(googleCredentialsPath(), "utf8"));
-    const keys = credentials.installed ?? credentials.web;
-    clientId = keys.client_id;
-    clientSecret = keys.client_secret;
-    redirectUri = keys.redirect_uris[0];
+    const shared = ownCredentialsFileExists() ? undefined : sharedGoogleClient();
+    if (shared) {
+      clientId = shared.clientId;
+      clientSecret = shared.clientSecret;
+      redirectUri = "http://localhost";
+    } else {
+      const credentials = JSON.parse(await readFile(googleCredentialsPath(), "utf8"));
+      const keys = credentials.installed ?? credentials.web;
+      clientId = keys.client_id;
+      clientSecret = keys.client_secret;
+      redirectUri = keys.redirect_uris[0];
+    }
     token = JSON.parse(await readFile(googleTokenPath(), "utf8"));
   }
   const auth = new google.auth.OAuth2(clientId, clientSecret, redirectUri);

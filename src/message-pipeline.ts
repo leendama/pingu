@@ -103,6 +103,23 @@ export function replyTargetText(message: Message): string | undefined {
   return describeContent(message.content.target.content);
 }
 
+/** Consecutive messages from the same sender, in order. A missing sender never merges with anyone. */
+export function senderRuns(messages: readonly Message[]): Message[][] {
+  const runs: Message[][] = [];
+  let currentKey: string | undefined;
+  for (const message of messages) {
+    const id = inboundSenderId(message);
+    const key = id === undefined ? `anonymous:${runs.length}` : `sender:${id}`;
+    if (runs.length === 0 || key !== currentKey) {
+      runs.push([message]);
+      currentKey = key;
+    } else {
+      runs[runs.length - 1]!.push(message);
+    }
+  }
+  return runs;
+}
+
 export function combineInboundMessages(messages: readonly Message[]): string {
   const texts = messages.map((message) => inboundMessageText(message));
   if (texts.some((text) => !text)) throw new Error("Only readable inbound messages can enter the message pipeline.");
@@ -136,6 +153,13 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
   return async function processMessage(space: Space, input: Message | readonly Message[]): Promise<void> {
     const messages = Array.isArray(input) ? input : [input];
     if (messages.length === 0) return;
+    // A batch is combined only for one sender. In a group, a guest's message
+    // must never ride along with the owner's and inherit the owner's tools.
+    const runs = senderRuns(messages);
+    if (runs.length > 1) {
+      for (const run of runs) await processMessage(space, run);
+      return;
+    }
     const message = messages.at(-1)!;
     const kind = spaceKind(space);
     // Unknown conversation types fail closed (group-level privacy) — and visibly, not silently.
@@ -282,9 +306,11 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
         message: error instanceof Error ? error.message : String(error),
       });
       if (!context.richResponseSent && !deliverySucceeded) {
-        const failure = context.sideEffectAttempted
-          ? "That failed after I started it. I didn't retry the action. Check its current state before trying again."
-          : "That failed before I could finish. Try again, or give me any missing detail.";
+        const failure = error instanceof Error && error.name === "TurnBudgetExceededError"
+          ? "That's more than one guest turn is allowed to cost. Ask something shorter, or start a fresh conversation."
+          : context.sideEffectAttempted
+            ? "That failed after I started it. I didn't retry the action. Check its current state before trying again."
+            : "That failed before I could finish. Try again, or give me any missing detail.";
         const progressMessage = progressPromise ? await progressPromise.catch(() => undefined) : undefined;
         let failureDelivered = false;
         if (progressMessage) {

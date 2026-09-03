@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { resolve } from "node:path";
 
@@ -42,6 +42,8 @@ export async function atomicWriteText(path: string, contents: string): Promise<v
 interface TransactionResult<T> {
   result: T;
   changed: boolean;
+  /** Delete the file instead of writing it, under the same lock as the read that decided so. */
+  remove?: boolean;
 }
 
 export class JsonFileStore<T> {
@@ -74,7 +76,8 @@ export class JsonFileStore<T> {
     return withFileLock(path, async () => {
       const value = await this.readUnlocked(path);
       const outcome = await mutator(value);
-      if (outcome.changed) await atomicWriteText(path, `${JSON.stringify(value, null, 2)}\n`);
+      if (outcome.remove) await rm(path, { force: true });
+      else if (outcome.changed) await atomicWriteText(path, `${JSON.stringify(value, null, 2)}\n`);
       return outcome.result;
     });
   }

@@ -162,7 +162,7 @@
       await wait(200);
     }
     introRunning = false;
-    if (!introAborted && finePointer) input.focus();
+    if (!introAborted && finePointer) input.focus({ preventScroll: true });
   }
 
   function renderDone(email) {
@@ -184,7 +184,7 @@
     const email = input.value.trim().toLowerCase();
     if (!EMAIL.test(email)) {
       shake();
-      input.focus();
+      input.focus({ preventScroll: true });
       return;
     }
     if (introRunning) {
@@ -216,7 +216,7 @@
     await pinguSays(RETRY, 800);
     input.value = email;
     setComposeEnabled(true);
-    if (finePointer) input.focus();
+    if (finePointer) input.focus({ preventScroll: true });
   });
 
   const saved = restored();

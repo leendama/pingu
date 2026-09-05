@@ -1,0 +1,19 @@
+<!-- Squarespace: Pages -> (your waitlist page) -> gear icon -> Advanced ->
+     Page Header Code Injection. Hides the site chrome so the conversation is
+     the whole page. Scoped to this page only; the rest of the site is untouched. -->
+<style>
+  #header,
+  .header,
+  header.Header,
+  #footer-sections,
+  footer.Footer,
+  .sqs-announcement-bar-dropzone { display: none !important; }
+
+  #sections > .page-section,
+  .page-section { padding-top: 0 !important; padding-bottom: 0 !important; min-height: 0 !important; }
+
+  .content-wrapper,
+  .sqs-layout .sqs-row .sqs-block { padding: 0 !important; }
+
+  body { overflow-x: hidden; }
+</style>

@@ -39,6 +39,21 @@ Today the domain points at Squarespace:
 Workspace (`smtp.google.com`, plus the SPF TXT record). Touching those breaks
 email. Only the A and CNAME rows above change.
 
+Squarespace groups these under a **Squarespace Defaults** heading with a single
+trash icon for the whole block; the rows cannot be edited one at a time. Deleting
+that block is the right move — it clears the four A records, the `www` CNAME and
+the HTTPS record together. Check what else sits inside the block before deleting
+it, and re-add anything that is not in the table above.
+
+**The HTTPS record matters.** Squarespace adds an `HTTPS` (SVCB) record on `@`
+carrying `ipv4hint="198.185.159.144,..."`. Browsers that read it will keep
+connecting to Squarespace even after the A records point at GitHub, so a
+leftover HTTPS record looks exactly like "DNS did not work". Delete it. GitHub
+Pages needs no HTTPS record of its own.
+
+If Squarespace puts its defaults back, the domain is still connected to the
+Squarespace site: disconnect it there first, then re-apply the records below.
+
 **Replace the `www` CNAME.** Point it at GitHub instead:
 
 | Host  | Type  | New value             |

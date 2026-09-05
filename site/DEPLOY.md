@@ -14,31 +14,39 @@ Merge this branch to `main`. `.github/workflows/pages.yml` publishes `site/` on
 every push that touches it. The page is then live at
 `https://leendama.github.io/pingu/`. Check it there before touching DNS.
 
-## 2. Claim the domain in the repo
+## 2. The domain is already claimed
 
-Add a file called `CNAME` in this folder containing nothing but the domain:
+`site/CNAME` contains `www.trycolty.com`. GitHub reads it on every deploy and
+serves the site under that name. Nothing to do here.
 
-```
-pingu.example.com
-```
+`www` is the canonical host; once the records below are in, GitHub redirects
+`trycolty.com` to `www.trycolty.com` on its own.
 
-Commit it. GitHub reads that file on deploy and serves the site at that name.
-Use exactly the host you want — `www.example.com` and `example.com` are
-different entries.
+## 3. Change two things in Squarespace DNS
 
-## 3. Point DNS at GitHub
+trycolty.com uses Squarespace's nameservers (`nsd1-4.squarespacedns.com`), so the
+records live in **Settings -> Domains -> trycolty.com -> DNS Settings**. That is a
+records table, not the site editor.
 
-In whatever manages your domain's DNS (if the domain came from Squarespace,
-that is **Settings → Domains → your domain → DNS Settings** — the DNS screen,
-not the site editor):
+Today the domain points at Squarespace:
 
-**A subdomain** such as `pingu.example.com` or `www.example.com` — one record:
+| Host  | Type  | Current value                                                        |
+| ----- | ----- | -------------------------------------------------------------------- |
+| `@`   | A     | 198.185.159.144, 198.185.159.145, 198.49.23.144, 198.49.23.145        |
+| `www` | CNAME | `ext-sq.squarespace.com`                                              |
 
-| Type  | Host    | Value                  |
-| ----- | ------- | ---------------------- |
-| CNAME | `pingu` | `leendama.github.io.`  |
+**Leave the MX and TXT records alone.** trycolty.com receives mail through Google
+Workspace (`smtp.google.com`, plus the SPF TXT record). Touching those breaks
+email. Only the A and CNAME rows above change.
 
-**The bare domain** such as `example.com` — four A records, all on host `@`:
+**Replace the `www` CNAME.** Point it at GitHub instead:
+
+| Host  | Type  | New value             |
+| ----- | ----- | --------------------- |
+| `www` | CNAME | `leendama.github.io.` |
+
+**Replace the four `@` A records** with GitHub's, so the bare domain redirects to
+`www` rather than dying:
 
 ```
 185.199.108.153
@@ -47,7 +55,7 @@ not the site editor):
 185.199.111.153
 ```
 
-and, so it works over IPv6, four AAAA records on `@`:
+and add four AAAA records on `@` so it also answers over IPv6:
 
 ```
 2606:50c0:8000::153
@@ -56,26 +64,24 @@ and, so it works over IPv6, four AAAA records on `@`:
 2606:50c0:8003::153
 ```
 
-Delete any existing A, AAAA or CNAME record on that same host first, or the two
-destinations fight and the result is random. Values are from GitHub's own
+Values are from GitHub's own
 [custom domain docs](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site).
 
-A subdomain is less work and less risky: pointing the bare domain moves your
-whole site off Squarespace, so anything else living there goes dark.
+Squarespace may warn that the domain is no longer connected to the site. That is
+the intended outcome: the waitlist page becomes what trycolty.com serves.
 
 ## 4. Wait, then turn on HTTPS
 
-DNS takes anywhere from a few minutes to a day. Once **Settings → Pages** stops
-showing a DNS warning, tick **Enforce HTTPS**. GitHub issues the certificate
-itself; there is nothing to buy or renew.
+DNS takes minutes to a day. When **Settings -> Pages** stops showing a DNS
+warning, tick **Enforce HTTPS**. GitHub issues the certificate; nothing to buy
+or renew.
 
 ## 5. Set the waitlist endpoint
 
 The page animates but stores nothing until `WAITLIST_ENDPOINT` at the top of
 `app.js` holds the Apps Script URL. See `apps-script/README.md`.
 
-## If DNS is not where you expect
+## Backing out
 
-Registrar and DNS host can differ. Whoever answers `whois` for the domain is the
-registrar; the nameservers it lists are who actually serves DNS, and that is
-where these records go.
+Put the four Squarespace A records and the `ext-sq.squarespace.com` www CNAME
+back and the domain returns to the Squarespace site. Nothing here is one-way.

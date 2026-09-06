@@ -24,8 +24,6 @@ Pingu can handle:
 
 ## Waitlist page
 
-`site/` is a static landing page styled as an iMessage thread. Emails go to a Google Sheet through Apps Script; see `site/apps-script/README.md` for the one-time setup. Pushes to `main` that touch `site/` deploy it to GitHub Pages; `site/DEPLOY.md` covers putting it on your own domain.
-
 ## Set it up
 
 You need Node.js 22 or newer.

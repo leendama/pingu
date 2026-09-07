@@ -29,6 +29,7 @@ interface ExpectedEventFields {
   location?: string;
   attendees?: string[];
   colorId?: string;
+  recurrence?: string[];
 }
 
 /** Every requested field the read-back event fails to match. A write is verified only when this is empty. */
@@ -40,6 +41,11 @@ export function eventMismatches(event: CalendarEventData, expected: ExpectedEven
   if (expected.description !== undefined && (event.description ?? "") !== expected.description) mismatches.push("description");
   if (expected.location !== undefined && (event.location ?? "") !== expected.location) mismatches.push("location");
   if (expected.colorId !== undefined && (event.colorId ?? "") !== expected.colorId) mismatches.push("colour");
+  if (expected.recurrence !== undefined) {
+    const actual = Array.isArray(event.recurrence) ? event.recurrence.map((rule) => rule.trim().toUpperCase()).sort() : [];
+    const wanted = expected.recurrence.map((rule) => rule.trim().toUpperCase()).sort();
+    if (JSON.stringify(actual) !== JSON.stringify(wanted)) mismatches.push("recurrence");
+  }
   if (expected.attendees) {
     const actual = new Set((Array.isArray(event.attendees) ? event.attendees as Array<{ email?: string | null; self?: boolean }> : [])
       .filter((attendee) => attendee && !attendee.self && attendee.email)
@@ -76,6 +82,7 @@ export interface CalendarEventData {
   colorId?: string | null;
   organizer?: { self?: boolean | null; email?: string | null } | null;
   recurringEventId?: string | null;
+  recurrence?: string[] | null;
   hangoutLink?: string | null;
   extendedProperties?: { private?: Record<string, string> | null; shared?: Record<string, string> | null } | null;
   etag?: string | null;
@@ -100,6 +107,28 @@ export interface CalendarPort {
 export interface CalendarZones {
   timezone: string;
   allDayTimezone: string;
+}
+
+/** Convert a safe RFC 5545 recurrence rule into Google's event representation. */
+export function calendarRecurrence(value: string | undefined): string[] | undefined {
+  if (!value?.trim()) return undefined;
+  const clauses = value.trim().toUpperCase().split(";");
+  const seen = new Set<string>();
+  for (const clause of clauses) {
+    const [key, ruleValue, ...extra] = clause.split("=");
+    if (!key || !ruleValue || extra.length || seen.has(key)) throw new Error("Recurrence must be a valid RFC 5545 rule, such as FREQ=WEEKLY;BYDAY=SU.");
+    seen.add(key);
+    const valid = (key === "FREQ" && /^(DAILY|WEEKLY|MONTHLY|YEARLY)$/.test(ruleValue))
+      || (key === "INTERVAL" && /^[1-9]\d*$/.test(ruleValue))
+      || (key === "COUNT" && /^[1-9]\d*$/.test(ruleValue))
+      || (key === "UNTIL" && /^\d{8}(T\d{6}Z)?$/.test(ruleValue))
+      || (key === "BYDAY" && /^(MO|TU|WE|TH|FR|SA|SU)(,(MO|TU|WE|TH|FR|SA|SU))*$/.test(ruleValue))
+      || (key === "WKST" && /^(MO|TU|WE|TH|FR|SA|SU)$/.test(ruleValue));
+    if (!valid) throw new Error("Recurrence must be a valid RFC 5545 rule, such as FREQ=WEEKLY;BYDAY=SU.");
+  }
+  if (!seen.has("FREQ")) throw new Error("Recurrence must include FREQ, such as FREQ=WEEKLY;BYDAY=SU.");
+  if (seen.has("COUNT") && seen.has("UNTIL")) throw new Error("A recurrence can end with COUNT or UNTIL, not both.");
+  return [`RRULE:${clauses.join(";")}`];
 }
 
 export async function calendarZones(port: CalendarPort, timezone: string): Promise<CalendarZones> {
@@ -699,8 +728,9 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
               description: { type: ["string", "null"] },
               location: { type: ["string", "null"] },
               attendees: { type: "array", items: { type: "string", description: "Attendee email address." } },
+              recurrence: { type: ["string", "null"], description: "Optional RFC 5545 recurrence rule without the RRULE prefix, for example FREQ=WEEKLY;BYDAY=SU. Null creates a one-off event." },
             },
-            required: ["title", "start", "end", "timezone", "description", "location", "attendees"],
+            required: ["title", "start", "end", "timezone", "description", "location", "attendees", "recurrence"],
             additionalProperties: false,
           },
         },
@@ -719,6 +749,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
             if (conflict) throw new Error(`That time conflicts with existing event ${conflict.event.id}${conflict.event.summary ? ` (${conflict.event.summary})` : ""}. Choose a free time.`);
           }
           const attendees = stringArray(args.attendees).map((email) => ({ email: cleanHeader(email) }));
+          const recurrence = calendarRecurrence(stringValue(args.recurrence));
           const created = await port.insertEvent(
             {
               summary: title,
@@ -727,6 +758,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
               description: stringValue(args.description),
               location: stringValue(args.location),
               attendees,
+              ...(recurrence ? { recurrence } : {}),
             },
             attendees.length ? "all" : "none",
           );
@@ -736,6 +768,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
             summary: title, start: startValue, end: endValue,
             description: stringValue(args.description), location: stringValue(args.location),
             attendees: attendees.map((attendee) => attendee.email),
+            ...(recurrence ? { recurrence } : {}),
           }, zones);
           if (mismatches.length) throw new Error(`Google created event ${event.id} but it does not match the request (${mismatches.join(", ")}). Check the calendar before trying again.`);
           return {

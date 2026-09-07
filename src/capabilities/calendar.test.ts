@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getPendingAction } from "../pending-confirmations.js";
 import type { ToolRunContext } from "../plugins.js";
-import { calendarPlugin, deleteConfirmationReason, eventMismatches, type CalendarEventData, type CalendarPort } from "./calendar.js";
+import { calendarPlugin, calendarRecurrence, deleteConfirmationReason, eventMismatches, type CalendarEventData, type CalendarPort } from "./calendar.js";
 
 let directory: string;
 beforeAll(async () => {
@@ -65,7 +65,7 @@ describe("calendarPlugin", () => {
 
     const noAttendees = await plugin.run("create_calendar_event", JSON.stringify({
       title: "Standup", start: "2026-09-01T09:00:00", end: "2026-09-01T09:15:00",
-      timezone: "UTC", description: null, location: null, attendees: [],
+      timezone: "UTC", description: null, location: null, attendees: [], recurrence: null,
     }), context);
     expect(JSON.parse(noAttendees.output).created).toBe(true);
     const inserts = () => calls.filter((call) => call.method === "insert");
@@ -77,9 +77,25 @@ describe("calendarPlugin", () => {
 
     await plugin.run("create_calendar_event", JSON.stringify({
       title: "Review", start: "2026-09-01T10:00:00", end: "2026-09-01T11:00:00",
-      timezone: "UTC", description: null, location: null, attendees: ["a@example.com"],
+      timezone: "UTC", description: null, location: null, attendees: ["a@example.com"], recurrence: null,
     }), context);
     expect(inserts()[1]).toMatchObject({ method: "insert", sendUpdates: "all" });
+  });
+
+  it("creates and verifies a weekly recurring event", async () => {
+    const calls: RecordedCall[] = [];
+    const result = await calendarPlugin(fakePort(calls)).run("create_calendar_event", JSON.stringify({
+      title: "Weekly review", start: "2026-09-06T09:00:00", end: "2026-09-06T10:00:00",
+      timezone: "UTC", description: null, location: null, attendees: [], recurrence: "FREQ=WEEKLY;BYDAY=SU",
+    }), context);
+    expect(JSON.parse(result.output)).toMatchObject({ created: true, verified: true });
+    expect(calls.find((call) => call.method === "insert")?.requestBody).toMatchObject({ recurrence: ["RRULE:FREQ=WEEKLY;BYDAY=SU"] });
+  });
+
+  it("accepts only safe recurrence rules", () => {
+    expect(calendarRecurrence("FREQ=WEEKLY;BYDAY=SU")).toEqual(["RRULE:FREQ=WEEKLY;BYDAY=SU"]);
+    expect(() => calendarRecurrence("FREQ=WEEKLY;BYSETPOS=-1")).toThrow(/valid RFC 5545/);
+    expect(() => calendarRecurrence("FREQ=WEEKLY;COUNT=3;UNTIL=20261231")).toThrow(/COUNT or UNTIL/);
   });
 
   it("creates an all-day event from bare dates", async () => {

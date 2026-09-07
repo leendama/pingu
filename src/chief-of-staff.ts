@@ -133,10 +133,16 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
   async function deliverBriefing(spaceId: string, proposals: Proposal[], reviewKey: string): Promise<void> {
     const briefing = deps.ledger.bindBriefing(spaceId, proposals.map((proposal) => proposal.id), now(), reviewKey);
     if (briefing.status === "delivered") return;
+    const boundProposals = deps.ledger.proposalsById(briefing.proposalIds);
     const uncertainRetry = briefing.status === "delivery_unknown" || briefing.attempts > 0;
     deps.ledger.markBriefingAttempt(reviewKey);
-    await deps.deliver(spaceId, `${uncertainRetry ? "Retrying because the last delivery was uncertain.\n\n" : ""}${formatBriefing(proposals)}`);
+    await deps.deliver(spaceId, `${uncertainRetry ? "Retrying because the last delivery was uncertain.\n\n" : ""}${formatBriefing(boundProposals)}`);
     deps.ledger.markBriefingDelivered(reviewKey, now());
+  }
+
+  function interruptProposals(ownerSpaceId: string, proposal: Proposal): Proposal[] {
+    const open = deps.ledger.listOpen(ownerSpaceId, now(), 5, deps.timezone);
+    return [proposal, ...open.filter((item) => item.id !== proposal.id)].slice(0, 5);
   }
 
   async function reviewEmailCandidate(messageId: string, options: { interrupt: boolean }): Promise<void> {
@@ -156,7 +162,9 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     const existing = ownerSpaces.map((ownerSpaceId) => ({ ownerSpaceId, proposal: deps.ledger.findSourceVersion(ownerSpaceId, "email_draft", sourceKey, sourceId) }));
     if (existing.every(({ proposal }) => Boolean(proposal))) {
       if (options.interrupt) {
-        for (const { ownerSpaceId } of existing) await deliverBriefing(ownerSpaceId, deps.ledger.listOpen(ownerSpaceId, now(), 5), `gmail:${messageId}:${ownerSpaceId}`);
+        for (const { ownerSpaceId, proposal } of existing) {
+          if (proposal) await deliverBriefing(ownerSpaceId, interruptProposals(ownerSpaceId, proposal), `gmail:${messageId}:${ownerSpaceId}`);
+        }
       }
       deps.ledger.setMetadata(reviewedKey, now().toISOString());
       return;
@@ -203,7 +211,9 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
         evidence: { sourceType: "gmail", sourceId, contact: recipient, category: "email-reply", ruleIds: preferences.map((rule) => rule.key).slice(0, 20), rationale: isSensitive ? "A sensitive message needs a private decision." : review.rationale, confidence: Math.max(0, Math.min(1, review.confidence)) },
         expiresAt: new Date(now().getTime() + 7 * 86_400_000).toISOString(),
       }, now());
-      if (options.interrupt && (urgent || alwaysSurface || (review.interrupt && !lowPriority))) await deliverBriefing(ownerSpaceId, deps.ledger.listOpen(ownerSpaceId, now(), 5), `gmail:${messageId}:${ownerSpaceId}`);
+      if (options.interrupt && (urgent || alwaysSurface || (review.interrupt && !lowPriority))) {
+        await deliverBriefing(ownerSpaceId, interruptProposals(ownerSpaceId, proposal), `gmail:${messageId}:${ownerSpaceId}`);
+      }
     }
     deps.ledger.setMetadata(reviewedKey, now().toISOString());
   }
@@ -227,7 +237,6 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     const recent = await deps.gmail.searchMessages("in:inbox is:unread newer_than:7d", 20);
     for (const message of recent) if (message.id) await reviewEmailCandidate(message.id, { interrupt: false });
     for (const ownerSpaceId of pendingSpaces) {
-      const proposals = deps.ledger.listOpen(ownerSpaceId, now(), 5);
       if (deps.reviewCalendar) {
         const plan = await deps.reviewCalendar(calendarEvidence(events), deps.ledger.preferences(now()), input.date, deps.planning);
         if (plan?.moves.length) {
@@ -250,16 +259,16 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
             return `${source.summary ?? move.eventId}: ${conciseEventTime(source.start, deps.timezone)}-${conciseEventTime(source.end, deps.timezone)} → ${conciseTimestamp(move.newStart, deps.timezone)}-${conciseTimestamp(move.newEnd, deps.timezone)}`;
           }).join("\n");
           const sensitivePlan = plan.moves.some((move) => /\b(medical|health|therapy|bank|legal|lawyer|salary|payroll)\b/i.test(snapshots.get(move.eventId)?.summary ?? ""));
-          proposals.unshift(deps.ledger.create({
+          deps.ledger.create({
             ownerSpaceId, kind: "calendar_move", sourceKey: `calendar:${input.date}`,
             summary: sensitivePlan ? "Sensitive calendar plan needs your review" : plan.summary, detail: exactDetail,
             payload: { timezone: deps.timezone, bufferMinutes: deps.planning.bufferMinutes, moves: plan.moves.map((move) => ({ ...move, expectedEtag: snapshots.get(move.eventId)?.etag, expectedUpdated: snapshots.get(move.eventId)?.updated })) },
             evidence: { sourceType: "calendar", sourceId: input.date, category: "same-day-reshuffle", ruleIds: deps.ledger.preferences(now()).map((rule) => rule.key).slice(0, 20), rationale: sensitivePlan ? "A private scheduling conflict needs a decision." : plan.rationale, confidence: plan.confidence },
             expiresAt: end.toISOString(),
-          }, now()));
+          }, now());
         }
       }
-      await deliverBriefing(ownerSpaceId, proposals.slice(0, 5), `${input.reviewKey}:${ownerSpaceId}`);
+      await deliverBriefing(ownerSpaceId, deps.ledger.listOpen(ownerSpaceId, now(), 5, deps.timezone), `${input.reviewKey}:${ownerSpaceId}`);
     }
   }
 

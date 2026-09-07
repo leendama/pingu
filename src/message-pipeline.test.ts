@@ -339,6 +339,28 @@ describe("owner replies to scheduling requests", () => {
     expect(await sentContentText(send, 0)).toContain("Booked");
   });
 
+  it("does not let an unmatched proposal command swallow a booking confirmation", async () => {
+    const deps = dependencies();
+    const resolveOwnerReply = vi.fn(async () => "Booked and invitation sent.");
+    const resolveProposalCommand = vi.fn(async () => "I can't match that to a current proposal.");
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, resolveOwnerReply, resolveProposalCommand })(directSpace(send), replyMessage("yes", "📅 Request PK-4F7K from Sam"));
+    expect(resolveOwnerReply).toHaveBeenCalledOnce();
+    expect(resolveProposalCommand).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("Booked");
+  });
+
+  it("does not let an unmatched proposal command swallow an armed action confirmation", async () => {
+    const deps = dependencies();
+    const consumeActionConfirmation = vi.fn(async () => ({ confirmedActionKey: "delete_event:event-1" }));
+    const resolveProposalCommand = vi.fn(async () => "I can't match that to a current proposal.");
+    deps.generateReply.mockImplementation(async (_space, _text, context) => context.confirmedActionKey ?? "missing confirmation");
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, consumeActionConfirmation, resolveProposalCommand })(directSpace(send), inboundMessage("yes"));
+    expect(resolveProposalCommand).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("delete_event:event-1");
+  });
+
   it("records the owner's chat so notices can reach them", async () => {
     const deps = dependencies();
     deps.generateReply.mockImplementation(async () => "ok");

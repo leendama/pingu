@@ -286,15 +286,17 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     guestMaxInboundChars: settings.guest.maxInboundChars,
     guestDisclosure: firstContactDisclosure(settings.assistantName, settings.ownerName),
     recordOwnerSpace,
-    resolveProposalCommand: ({ texts, spaceId }) => handleProposalCommand({
-      ledger: proposalLedger,
-      gmail,
-      calendar,
-      ownerSpaceId: spaceId,
-      texts,
-      timezone: settings.timezone,
-      runHistoryImport: (proposal) => chiefOfStaff.importHistory(proposal),
-    }),
+    resolveProposalCommand: settings.chiefOfStaff.enabled
+      ? ({ texts, spaceId }) => handleProposalCommand({
+          ledger: proposalLedger,
+          gmail,
+          calendar,
+          ownerSpaceId: spaceId,
+          texts,
+          timezone: settings.timezone,
+          runHistoryImport: (proposal) => chiefOfStaff.importHistory(proposal),
+        })
+      : undefined,
     resolveOwnerReply: (input) => scheduling.resolveOwnerReply(input),
     onReplyDelivered: markReplyDelivered,
     synthesizeVoice: async (text) => {

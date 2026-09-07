@@ -135,6 +135,15 @@ function encodeHeader(value: string): string {
   return `=?UTF-8?B?${Buffer.from(cleanHeader(value), "utf8").toString("base64")}?=`;
 }
 
+function decodeHeader(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return value.replace(/=\?([^?]+)\?([bq])\?([^?]*)\?=/gi, (_encoded, charset: string, encoding: string, payload: string) => {
+    if (!/^utf-8$/i.test(charset)) return _encoded;
+    if (encoding.toLowerCase() === "b") return Buffer.from(payload, "base64").toString("utf8");
+    return payload.replace(/_/g, " ").replace(/=([0-9a-f]{2})/gi, (_match: string, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
+  });
+}
+
 export function buildRawEmail(args: JsonObject): string {
   const bodies = emailBodies(typeof args.body === "string" ? args.body : "");
   const headers = [
@@ -190,7 +199,7 @@ export async function createVerifiedGmailDraft(port: GmailPort, input: {
     || !sameAddresses(message.to, input.to)
     || !sameAddresses(message.cc, input.cc)
     || !sameAddresses(message.bcc, input.bcc)
-    || message.subject !== input.subject
+    || decodeHeader(message.subject) !== input.subject
     || !message.body.includes(input.body.trim())) {
     throw new Error("Gmail accepted the draft but its read-back did not match.");
   }

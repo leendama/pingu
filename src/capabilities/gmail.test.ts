@@ -4,6 +4,7 @@ import type { ToolRunContext } from "../plugins.js";
 import {
   appendPinguSignature,
   boundedGmailBody,
+  createVerifiedGmailDraft,
   GMAIL_BODY_CHAR_LIMIT,
   gmailBodyText,
   gmailPlugin,
@@ -132,6 +133,12 @@ describe("gmailPlugin", () => {
     port.readDraft = async () => ({ id: "draft-1", message: { to: "other@example.com", cc: "", bcc: "", subject: "Lunch", body: "Midday tomorrow?" } });
     const result = await gmailPlugin(port, fakeStore()).run("create_gmail_draft", JSON.stringify(draftArgs), chatContext());
     expect(JSON.parse(result.output).error).toMatch(/read-back did not match/);
+  });
+
+  it("accepts Gmail's RFC 2047 encoded Subject header during draft read-back", async () => {
+    const port = fakePort({ raws: [], sent: [] });
+    port.readDraft = async () => ({ id: "draft-1", message: { to: "friend@example.com", cc: "", bcc: "", subject: "=?UTF-8?B?THVuY2g=?=", body: "Midday tomorrow?" } });
+    await expect(createVerifiedGmailDraft(port, draftArgs)).resolves.toBe("draft-1");
   });
 
   it("adds the Pingu signature once", () => {

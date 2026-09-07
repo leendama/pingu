@@ -185,11 +185,34 @@ describe("chief of staff service", () => {
     const gmail = { readMessage: async () => ({ id: "message", threadId: "thread", labelIds: ["INBOX"], from: "person@example.com", subject: "Question", body: "Can you reply?" }), searchMessages: async () => [] } as unknown as GmailPort;
     const service = createChiefOfStaff({ ledger, gmail, calendar: { listEvents: async () => [] } as unknown as CalendarPort, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner-one", "owner-two"], deliver: async (space, text) => { if (space === "owner-two" && failSecondOwner) { failSecondOwner = false; throw new Error("delivery uncertain"); } sent.push({ space, text }); }, reviewEmail, now: () => new Date("2029-01-01T00:00:00.000Z") });
     await expect(service.reviewIncomingEmail("message")).rejects.toThrow("delivery uncertain");
+    ledger.create({ ownerSpaceId: "owner-two", kind: "history_import", summary: "Later proposal", detail: "Must not change the retry's ordinals.", payload: {}, evidence: { sourceType: "history", rationale: "Later", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });
     await service.reviewIncomingEmail("message");
     expect(reviewEmail).toHaveBeenCalledOnce();
     expect(sent.filter(({ space }) => space === "owner-one")).toHaveLength(1);
     expect(sent.filter(({ space }) => space === "owner-two")).toHaveLength(1);
     expect(sent.find(({ space }) => space === "owner-two")?.text).toContain("Retrying because the last delivery was uncertain");
+    expect(sent.find(({ space }) => space === "owner-two")?.text).not.toContain("Later proposal");
+    ledger.close();
+  });
+
+  it("includes the incoming urgent proposal even when five older proposals are open", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pingu-chief-urgent-order-"));
+    directories.push(directory);
+    const ledger = new ProposalLedger(join(directory, "ledger.sqlite"));
+    for (let index = 1; index <= 5; index += 1) {
+      ledger.create({ ownerSpaceId: "owner", kind: "history_import", summary: `Older ${index}`, detail: "", payload: {}, evidence: { sourceType: "history", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });
+    }
+    const delivered: string[] = [];
+    const service = createChiefOfStaff({
+      ledger, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner"], deliver: async (_space, text) => { delivered.push(text); },
+      gmail: { readMessage: async () => ({ id: "urgent", threadId: "urgent-thread", labelIds: ["INBOX"], from: "person@example.com", subject: "Urgent question", body: "Please reply today." }), searchMessages: async () => [] } as unknown as GmailPort,
+      calendar: { listEvents: async () => [] } as unknown as CalendarPort,
+      reviewEmail: async () => ({ actionable: true, interrupt: true, summary: "Urgent reply", rationale: "Time-sensitive.", confidence: 1, draftBody: "On it." }),
+      now: () => new Date("2029-01-01T00:00:00.000Z"),
+    });
+    await service.reviewIncomingEmail("urgent");
+    expect(delivered[0]).toContain("Urgent reply");
+    expect(delivered[0]).not.toContain("Older 5");
     ledger.close();
   });
 

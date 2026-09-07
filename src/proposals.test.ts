@@ -64,6 +64,26 @@ describe("ProposalLedger", () => {
     store.close();
   });
 
+  it("keeps a tomorrow deferral deferred during the owner's local evening", async () => {
+    const store = await ledger();
+    const proposal = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Reply", detail: "", payload: {}, evidence: { sourceType: "gmail", rationale: "", confidence: 1 }, expiresAt: "2029-02-01T00:00:00.000Z" }, new Date("2029-01-02T04:00:00.000Z"));
+    store.bindBriefing("owner", [proposal.id], new Date(), "america-evening");
+    store.markBriefingDelivered("america-evening");
+    const deferred = store.parseCommand("owner", "not now tomorrow", new Date("2029-01-02T04:00:00.000Z"), "America/New_York");
+    expect(deferred).toMatchObject({ type: "defer", until: "2029-01-02" });
+    expect(store.listOpen("owner", new Date("2029-01-02T04:00:00.000Z"), 5, "America/New_York")).toEqual([]);
+    store.close();
+  });
+
+  it("does not execute a numbered proposal when extra prose follows the command", async () => {
+    const store = await ledger();
+    const proposal = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Reply", detail: "", payload: {}, evidence: { sourceType: "gmail", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });
+    store.bindBriefing("owner", [proposal.id], new Date(), "anchored-command");
+    store.markBriefingDelivered("anchored-command");
+    expect(store.parseCommand("owner", "approve 1 days of leave for Sam", new Date("2029-01-01T00:00:00.000Z"))).toBeUndefined();
+    store.close();
+  });
+
   it("keeps ordinals bound to the last delivered briefing while a replacement delivery is uncertain", async () => {
     const store = await ledger();
     const first = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "First", detail: "", payload: {}, evidence: { sourceType: "gmail", sourceId: "one", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });

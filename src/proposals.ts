@@ -213,8 +213,8 @@ export class ProposalLedger {
     }
   }
 
-  listOpen(ownerSpaceId: string, now = new Date(), limit = 5): Proposal[] {
-    this.db.prepare("UPDATE proposals SET status = 'proposed', deferred_until = NULL WHERE owner_space_id = ? AND status = 'deferred' AND deferred_until <= ? AND expires_at > ?").run(ownerSpaceId, now.toISOString().slice(0, 10), now.toISOString());
+  listOpen(ownerSpaceId: string, now = new Date(), limit = 5, timezone = "UTC"): Proposal[] {
+    this.db.prepare("UPDATE proposals SET status = 'proposed', deferred_until = NULL WHERE owner_space_id = ? AND status = 'deferred' AND deferred_until <= ? AND expires_at > ?").run(ownerSpaceId, localDate(now.getTime(), timezone), now.toISOString());
     this.db.prepare("UPDATE proposals SET status = 'expired' WHERE owner_space_id = ? AND status IN ('proposed','deferred') AND expires_at <= ?").run(ownerSpaceId, now.toISOString());
     const rows = this.db.prepare("SELECT id FROM proposals WHERE owner_space_id = ? AND status = 'proposed' ORDER BY created_at ASC LIMIT ?").all(ownerSpaceId, limit) as Array<{ id: string }>;
     return rows.map(({ id }) => this.get(id)!).filter(Boolean);
@@ -224,6 +224,10 @@ export class ProposalLedger {
     const briefing = this.db.prepare("SELECT proposal_ids_json FROM briefings WHERE owner_space_id = ? AND status = 'delivered' AND superseded_at IS NULL ORDER BY delivered_at DESC LIMIT 1").get(ownerSpaceId) as { proposal_ids_json?: string } | undefined;
     if (!briefing?.proposal_ids_json) return [];
     return (JSON.parse(briefing.proposal_ids_json) as string[]).map((id) => this.get(id)).filter((proposal): proposal is Proposal => Boolean(proposal));
+  }
+
+  proposalsById(ids: readonly string[]): Proposal[] {
+    return ids.map((id) => this.get(id)).filter((proposal): proposal is Proposal => Boolean(proposal));
   }
 
   findSourceVersion(ownerSpaceId: string, kind: ProposalKind, sourceKey: string, sourceId: string): Proposal | undefined {
@@ -341,7 +345,7 @@ export class ProposalLedger {
       else if (/^(approve|reject|ignore|not important|show|done|always surface)$/i.test(normalized)) normalized = `${normalized} 1`;
       else if (/^not now\s+(.+)$/i.test(normalized) && !/\s\d+$/.test(normalized)) normalized = `${normalized} 1`;
     }
-    const match = normalized.match(/^(approve|reject|ignore|not important|why|show|done|always surface)\s+(\d+)|^not now\s+(.+?)\s+(\d+)$/i);
+    const match = normalized.match(/^(?:(approve|reject|ignore|not important|why|show|done|always surface)\s+(\d+)|not now\s+(.+?)\s+(\d+))$/i);
     if (!match) return undefined;
     const verb = (match[1] ?? "defer").toLowerCase();
     const ordinal = Number(match[2] ?? match[4]);

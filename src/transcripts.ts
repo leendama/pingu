@@ -207,13 +207,14 @@ async function clearChiefOfStaffLedger(): Promise<boolean> {
         if (existing.has(table)) db.exec(`DELETE FROM ${table}`);
       }
       db.exec("COMMIT");
-      // Rebuild the database and truncate the WAL so deleted proposal and
-      // source-derived text is not left in reusable SQLite pages.
-      db.exec("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);");
     } catch (error) {
       db.exec("ROLLBACK");
       throw error;
     }
+    // Rebuild the database and truncate the WAL so deleted proposal and
+    // source-derived text is not left in reusable SQLite pages. This is outside
+    // the transaction because VACUUM cannot run inside one.
+    db.exec("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);");
   } finally {
     db.close();
   }

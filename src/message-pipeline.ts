@@ -224,14 +224,6 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       await dependencies.recordOwnerSpace?.(senderId, space.id).catch((error) => {
         console.error("Unable to record the owner's chat:", error instanceof Error ? error.message : String(error));
       });
-      if (dependencies.resolveProposalCommand) {
-        const handled = await dependencies.resolveProposalCommand({ texts: directTexts, spaceId: space.id, senderId });
-        if (handled) {
-          await sendNotice(space, message, false, handled, "chief-of-staff-command");
-          dependencies.onReplyDelivered?.();
-          return;
-        }
-      }
       if (dependencies.resolveOwnerReply) {
         const handled = await dependencies.resolveOwnerReply({ message, texts: directTexts, spaceId: space.id, senderId });
         if (handled) {
@@ -248,6 +240,14 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
     const action = role === "owner" && dependencies.consumeActionConfirmation
       ? await dependencies.consumeActionConfirmation(space.id, directTexts)
       : {};
+    if (role === "owner" && senderId && !isGroup && !confirmation.confirmedDraftId && !action.confirmedActionKey && dependencies.resolveProposalCommand) {
+      const handled = await dependencies.resolveProposalCommand({ texts: directTexts, spaceId: space.id, senderId });
+      if (handled) {
+        await sendNotice(space, message, false, handled, "chief-of-staff-command");
+        dependencies.onReplyDelivered?.();
+        return;
+      }
+    }
     const context: ToolRunContext = {
       config: { timezone: dependencies.timezone },
       spaceId: space.id,

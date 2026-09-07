@@ -16,7 +16,10 @@
 - `src/pending-confirmations.ts` arms a destructive action (recurring, attendee, or bulk deletes) that fires only on an explicit yes in the next message; email drafts use the same pattern in `src/pending-emails.ts`.
 - `src/state.ts` provides serialized atomic JSON storage for every data file. One process per data directory.
 - `src/email-alerts.ts` stores Gmail sender rules and polls for new matching messages while Pingu is running.
-- `src/poller.ts` is the one background tick loop the reminder, email-alert, and request-expiry schedulers share.
+- `src/gmail-history.ts` advances Gmail's incremental history cursor only after every new message was reviewed. An expired cursor gets a bounded two-day replay.
+- `src/chief-of-staff.ts` reads relevant Gmail threads and sent context, turns email and calendar evidence into owner-only proposals, and prepares an approval-gated history sample. `src/proposals.ts` is the versioned SQLite approval, briefing-delivery, feedback, and preference ledger. `src/proposal-actions.ts` executes exact approvals without asking the conversation model to reinterpret them.
+- `src/daily-review.ts` computes the timezone-aware 9am review and bounded catch-up window. `src/proactive-delivery.ts` rechecks owner and direct-chat status immediately before every private proactive message.
+- `src/poller.ts` is the one background tick loop the reminder, email-alert, Gmail-history, chief-of-staff, cleanup, and request-expiry schedulers share.
 - `src/diagnostics.ts` tests every probeable connection and reports plain-language failures; the wizard's "Test connections" button and `npm run doctor` both cross this one interface.
 - `src/runtime-status.ts` records when the agent started and last replied; the wizard and `/healthz` read it as proof of life.
 - `src/setup-server.ts` handles browser setup, Google OAuth, claim codes, owner removal, and data deletion.

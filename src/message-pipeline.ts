@@ -16,9 +16,9 @@ export interface MessagePipelineDependencies {
   progressDelayMs?: number;
   generateReply: (spaceId: string, inboundText: string, context: ToolRunContext) => Promise<string>;
   synthesizeVoice: (text: string) => Promise<Buffer>;
-  consumeEmailConfirmation: (spaceId: string, texts: readonly string[]) => Promise<ConfirmationResult>;
-  getPendingEmail: (spaceId: string) => Promise<PendingEmail | undefined>;
-  markEmailReviewed: (spaceId: string, draftId: string) => Promise<void>;
+  consumeEmailConfirmation?: (spaceId: string, texts: readonly string[]) => Promise<ConfirmationResult>;
+  getPendingEmail?: (spaceId: string) => Promise<PendingEmail | undefined>;
+  markEmailReviewed?: (spaceId: string, draftId: string) => Promise<void>;
   /** Consume an armed destructive action (delete confirmations). */
   consumeActionConfirmation?: (spaceId: string, texts: readonly string[]) => Promise<{ confirmedActionKey?: string }>;
   /** Who the sender is. A missing sender id must resolve to "guest". */
@@ -37,6 +37,8 @@ export interface MessagePipelineDependencies {
   recordOwnerSpace?: (senderId: string, spaceId: string) => Promise<void>;
   /** Let a verified owner resolve a scheduling request by replying; returns the reply to send when handled. */
   resolveOwnerReply?: (input: { message: Message; texts: readonly string[]; spaceId: string; senderId: string }) => Promise<string | undefined>;
+  /** Resolve durable chief-of-staff approval commands before the model sees them. */
+  resolveProposalCommand?: (input: { texts: readonly string[]; spaceId: string; senderId: string }) => Promise<string | undefined>;
   /** Called once per turn after a reply (text or rich response) reaches the user. */
   onReplyDelivered?: () => void;
 }
@@ -52,7 +54,7 @@ export function formatEmailDraft(email: PendingEmail): string {
     "",
     email.body,
     "",
-    "Reply “send it” or “yes” in your next message if you want me to send it.",
+    "The draft is ready in Gmail for you to review and send manually.",
   ].join("\n");
 }
 
@@ -222,6 +224,14 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       await dependencies.recordOwnerSpace?.(senderId, space.id).catch((error) => {
         console.error("Unable to record the owner's chat:", error instanceof Error ? error.message : String(error));
       });
+      if (dependencies.resolveProposalCommand) {
+        const handled = await dependencies.resolveProposalCommand({ texts: directTexts, spaceId: space.id, senderId });
+        if (handled) {
+          await sendNotice(space, message, false, handled, "chief-of-staff-command");
+          dependencies.onReplyDelivered?.();
+          return;
+        }
+      }
       if (dependencies.resolveOwnerReply) {
         const handled = await dependencies.resolveOwnerReply({ message, texts: directTexts, spaceId: space.id, senderId });
         if (handled) {
@@ -232,7 +242,9 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       }
     }
 
-    const confirmation = role === "owner" ? await dependencies.consumeEmailConfirmation(space.id, directTexts) : {};
+    const confirmation = role === "owner" && dependencies.consumeEmailConfirmation
+      ? await dependencies.consumeEmailConfirmation(space.id, directTexts)
+      : {};
     const action = role === "owner" && dependencies.consumeActionConfirmation
       ? await dependencies.consumeActionConfirmation(space.id, directTexts)
       : {};
@@ -279,7 +291,7 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       }
 
       if (context.draftForReview) {
-        const pending = await dependencies.getPendingEmail(space.id);
+        const pending = await dependencies.getPendingEmail?.(space.id);
         if (!pending || pending.draftId !== context.draftForReview) {
           throw new Error("The email draft selected for review is no longer pending.");
         }
@@ -297,7 +309,7 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       dependencies.onReplyDelivered?.();
 
       if (context.draftForReview) {
-        await dependencies.markEmailReviewed(space.id, context.draftForReview);
+        await dependencies.markEmailReviewed?.(space.id, context.draftForReview);
       }
     } catch (error) {
       clearTimeout(progressTimer);

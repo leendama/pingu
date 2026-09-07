@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, rm } from "node:fs/promises";
+import { access, readdir, readFile, rm } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import { startPoller } from "./poller.js";
@@ -184,13 +185,48 @@ export const PINGU_DATA_FILES = [
   "guests.json",
   "owners.json",
   "scheduling-requests.json",
+  "chief-of-staff.sqlite",
+  "chief-of-staff.sqlite-shm",
+  "chief-of-staff.sqlite-wal",
 ];
+
+async function clearChiefOfStaffLedger(): Promise<boolean> {
+  const filename = dataPath("chief-of-staff.sqlite");
+  try {
+    await access(filename);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const db = new DatabaseSync(filename);
+  try {
+    const existing = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const table of ["action_claims", "briefings", "proposals", "preferences", "metadata"]) {
+        if (existing.has(table)) db.exec(`DELETE FROM ${table}`);
+      }
+      db.exec("COMMIT");
+      // Rebuild the database and truncate the WAL so deleted proposal and
+      // source-derived text is not left in reusable SQLite pages.
+      db.exec("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.close();
+  }
+  return true;
+}
 
 /** Remove chat history and every runtime record. Encrypted credentials and Google tokens stay so the owner is not signed out. */
 export async function deleteAllPinguData(): Promise<{ transcripts: number; files: string[] }> {
   const transcripts = await deleteAllTranscripts();
   const removed: string[] = [];
+  if (await clearChiefOfStaffLedger()) removed.push("chief-of-staff.sqlite");
   for (const filename of PINGU_DATA_FILES) {
+    if (filename.startsWith("chief-of-staff.sqlite")) continue;
     try {
       await rm(dataPath(filename), { force: false });
       removed.push(filename);

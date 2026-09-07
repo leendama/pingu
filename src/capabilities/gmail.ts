@@ -1,5 +1,5 @@
-import type { PendingEmail } from "../pending-emails.js";
 import type { PinguPlugin } from "../plugins.js";
+import type { PendingEmail } from "../pending-emails.js";
 import { capabilityPlugin, cleanHeader, numberValue, stringArray, stringValue, type JsonObject } from "../tools.js";
 
 export interface GmailPort {
@@ -7,23 +7,40 @@ export interface GmailPort {
   searchMessages(query: string | undefined, maxResults: number): Promise<GmailMessageSummary[]>;
   /** Read one complete message, including its decoded text body. */
   readMessage(messageId: string): Promise<GmailMessage>;
+  /** Read a thread in Gmail order when approval must prove its source is still current. */
+  readThread?(threadId: string): Promise<GmailMessage[]>;
   /** Create a draft from a base64url RFC 2822 message and return its draft ID. */
-  createDraft(raw: string): Promise<string>;
-  sendDraft(draftId: string): Promise<{ messageId?: string | null; threadId?: string | null }>;
+  createDraft(raw: string, threadId?: string): Promise<string>;
+  /** Read a draft back after creation so Pingu never claims an unverified outcome. */
+  readDraft?(draftId: string): Promise<{ id?: string | null; message?: GmailMessage }>;
+  /** Current Gmail mailbox history cursor, used for push-like incremental review. */
+  getHistoryId?(): Promise<string>;
+  /** Message IDs added since a cursor. Throws GmailHistoryExpiredError when Google has expired it. */
+  listHistory?(startHistoryId: string): Promise<{ historyId: string; messageIds: string[] }>;
+  /** Legacy compatibility only. Pingu never calls this to send mail. */
+  sendDraft?(draftId: string): Promise<{ messageId?: string | null; threadId?: string | null }>;
+}
+
+export class GmailHistoryExpiredError extends Error {
+  constructor() { super("Gmail's saved history cursor expired."); this.name = "GmailHistoryExpiredError"; }
 }
 
 export interface GmailMessageSummary {
   id?: string | null;
+  threadId?: string | null;
   from?: string | null;
   to?: string | null;
   subject?: string | null;
   date?: string | null;
   snippet?: string | null;
+  labelIds?: string[] | null;
 }
 
 export interface GmailMessage extends GmailMessageSummary {
-  threadId?: string | null;
   cc?: string | null;
+  bcc?: string | null;
+  messageIdHeader?: string | null;
+  references?: string | null;
   body: string;
   /** True when the body was cut at GMAIL_BODY_CHAR_LIMIT. */
   truncated?: boolean;
@@ -34,12 +51,6 @@ export interface GmailMessagePart {
   filename?: string | null;
   body?: { data?: string | null; attachmentId?: string | null } | null;
   parts?: GmailMessagePart[] | null;
-}
-
-export interface PendingEmailStore {
-  set(email: PendingEmail): Promise<void>;
-  get(spaceId: string): Promise<PendingEmail | undefined>;
-  clear(spaceId: string, draftId: string): Promise<void>;
 }
 
 export const PINGU_EMAIL_SIGNATURE = "this email was composed by [Pingu](https://github.com/leendama/pingu), noot noot";
@@ -131,6 +142,8 @@ export function buildRawEmail(args: JsonObject): string {
     ...(stringArray(args.cc).length ? [`Cc: ${stringArray(args.cc).map(cleanHeader).join(", ")}`] : []),
     ...(stringArray(args.bcc).length ? [`Bcc: ${stringArray(args.bcc).map(cleanHeader).join(", ")}`] : []),
     `Subject: ${encodeHeader(stringValue(args.subject) ?? "")}`,
+    ...(stringValue(args.in_reply_to) ? [`In-Reply-To: ${cleanHeader(stringValue(args.in_reply_to)!)}`] : []),
+    ...(stringValue(args.references) ? [`References: ${cleanHeader(stringValue(args.references)!)}`] : []),
     "MIME-Version: 1.0",
     `Content-Type: multipart/alternative; boundary="${EMAIL_BOUNDARY}"`,
   ];
@@ -150,12 +163,46 @@ export function buildRawEmail(args: JsonObject): string {
   return Buffer.from(`${headers.join("\r\n")}\r\n\r\n${mimeBody}`, "utf8").toString("base64url");
 }
 
-export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): PinguPlugin {
+function headerAddresses(value?: string | null): string[] {
+  if (!value) return [];
+  return [...value.matchAll(/(?:<([^<>\s]+@[^<>\s]+)>|\b([^\s<>,;]+@[^\s<>,;]+)\b)/g)]
+    .map((match) => (match[1] ?? match[2])!.toLowerCase()).sort();
+}
+
+function sameAddresses(actual: string | null | undefined, expected: string[]): boolean {
+  return JSON.stringify(headerAddresses(actual)) === JSON.stringify(expected.map((value) => value.toLowerCase()).sort());
+}
+
+export async function createVerifiedGmailDraft(port: GmailPort, input: {
+  to: string[]; cc: string[]; bcc: string[]; subject: string; body: string;
+  threadId?: string; inReplyTo?: string; references?: string;
+}): Promise<string> {
+  const draftId = await port.createDraft(buildRawEmail({
+    to: input.to, cc: input.cc, bcc: input.bcc, subject: input.subject, body: input.body,
+    in_reply_to: input.inReplyTo, references: input.references,
+  }), input.threadId);
+  if (!port.readDraft) return draftId;
+  const readBack = await port.readDraft(draftId);
+  const message = readBack.message;
+  if (readBack.id !== draftId
+    || !message
+    || (input.threadId && message.threadId !== input.threadId)
+    || !sameAddresses(message.to, input.to)
+    || !sameAddresses(message.cc, input.cc)
+    || !sameAddresses(message.bcc, input.bcc)
+    || message.subject !== input.subject
+    || !message.body.includes(input.body.trim())) {
+    throw new Error("Gmail accepted the draft but its read-back did not match.");
+  }
+  return draftId;
+}
+
+export function gmailPlugin(port: GmailPort, _legacyPendingEmails?: PendingEmailStore): PinguPlugin {
   return capabilityPlugin(
     {
       id: "gmail",
       name: "Gmail",
-      description: "Search, read, draft, review, and confirmation-gated sending.",
+      description: "Search, read, and draft email for the owner to send manually in Gmail.",
       instructions: [
         "Gmail search returns summaries with From and To headers. When the owner asks for someone's email address, or names an email recipient without an address, search Gmail before asking them for it. Search the inbox for mail from the person's name first; if needed, search sent and received mail by that name. Use an address only when the headers clearly associate it with that person. If there are no reliable matches, ask; if there are conflicting matches, show the short choices and ask which one.",
         "Call read_gmail_message with a result ID whenever the user asks to read, summarize, quote, or reply based on the full email.",
@@ -215,7 +262,7 @@ export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): 
         schema: {
           type: "function",
           name: "create_gmail_draft",
-          description: "Create a Gmail draft before any email can be sent. Return the full recipients, subject, and body for review and ask for a separate confirmation.",
+          description: "Create a Gmail draft for the owner to review and send manually in Gmail. Pingu never sends email.",
           strict: true,
           parameters: {
             type: "object",
@@ -231,22 +278,12 @@ export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): 
           },
         },
         safeAfterUntrusted: true,
-        run: async (args, context) => {
+        run: async (args) => {
           if (stringArray(args.to).length === 0) throw new Error("At least one recipient is required.");
-          const body = appendPinguSignature(typeof args.body === "string" ? args.body : "");
-          const draftId = await port.createDraft(buildRawEmail({ ...args, body }));
-          await pendingEmails.set({
-            spaceId: context.spaceId,
-            draftId,
-            to: stringArray(args.to),
-            cc: stringArray(args.cc),
-            bcc: stringArray(args.bcc),
-            subject: stringValue(args.subject) ?? "",
-            body,
-            createdAt: new Date().toISOString(),
-          });
+          const rawBody = typeof args.body === "string" ? args.body : "";
+          const body = appendPinguSignature(rawBody);
+          const draftId = await createVerifiedGmailDraft(port, { to: stringArray(args.to), cc: stringArray(args.cc), bcc: stringArray(args.bcc), subject: stringValue(args.subject) ?? "", body: rawBody });
           return {
-            draftCreated: draftId,
             output: JSON.stringify({
               created: true,
               draft_id: draftId,
@@ -255,77 +292,18 @@ export function gmailPlugin(port: GmailPort, pendingEmails: PendingEmailStore): 
               bcc: stringArray(args.bcc),
               subject: stringValue(args.subject) ?? "",
               body,
-              confirmation_required_to_send: true,
-              confirmation_must_be_separate_message: true,
-            }),
-          };
-        },
-      },
-      {
-        schema: {
-          type: "function",
-          name: "send_gmail_draft",
-          description: "Send the pending Gmail draft only after the user reviewed it and explicitly confirmed in a separate message. The server rejects same-turn or unconfirmed sends.",
-          strict: true,
-          parameters: {
-            type: "object",
-            properties: {
-              draft_id: { type: "string" },
-            },
-            required: ["draft_id"],
-            additionalProperties: false,
-          },
-        },
-        run: async (args, context) => {
-          const draftId = stringValue(args.draft_id);
-          if (!draftId) throw new Error("A Gmail draft ID is required.");
-          const pending = await pendingEmails.get(context.spaceId);
-          if (!pending || pending.draftId !== draftId) {
-            throw new Error("That draft is not awaiting confirmation in this conversation. Show the draft first and ask the user to confirm.");
-          }
-          if (context.confirmedEmailDraftId !== draftId) {
-            throw new Error("Email sending is blocked until the user confirms in a separate message after reviewing the draft.");
-          }
-          const sent = await port.sendDraft(draftId);
-          await pendingEmails.clear(context.spaceId, draftId);
-          return { output: JSON.stringify({ sent: true, message_id: sent.messageId, thread_id: sent.threadId }) };
-        },
-      },
-      {
-        schema: {
-          type: "function",
-          name: "review_gmail_draft",
-          description: "Re-display the complete pending Gmail draft and reopen confirmation when another user message intervened after the previous review. This never sends the draft.",
-          strict: true,
-          parameters: {
-            type: "object",
-            properties: { draft_id: { type: "string" } },
-            required: ["draft_id"],
-            additionalProperties: false,
-          },
-        },
-        sideEffecting: false,
-        run: async (args, context) => {
-          const draftId = stringValue(args.draft_id);
-          const pending = await pendingEmails.get(context.spaceId);
-          if (!draftId || !pending || pending.draftId !== draftId) {
-            throw new Error("That draft is not pending in this conversation.");
-          }
-          return {
-            draftCreated: draftId,
-            output: JSON.stringify({
-              draft_id: pending.draftId,
-              to: pending.to,
-              cc: pending.cc,
-              bcc: pending.bcc,
-              subject: pending.subject,
-              body: pending.body,
-              confirmation_required_to_send: true,
-              confirmation_must_be_next_message: true,
+              manual_send_required: true,
+              tell_the_owner: "The draft is ready in Gmail. Review it there and send it yourself when you are happy.",
             }),
           };
         },
       },
     ],
   );
+}
+/** Legacy store shape retained for third-party compile compatibility; no longer used by Pingu. */
+export interface PendingEmailStore {
+  set(email: PendingEmail): Promise<void>;
+  get(spaceId: string): Promise<PendingEmail | undefined>;
+  clear(spaceId: string, draftId: string): Promise<void>;
 }

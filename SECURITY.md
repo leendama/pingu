@@ -10,7 +10,8 @@ Use GitHub's private vulnerability reporting for credential exposure, authentica
 - The owner is whoever texted an active claim code. Pingu records the exact sender id Spectrum reports, never a number typed into settings. `PINGU_OWNER_SENDER_IDS` can add ids you already know. A message with no sender id is treated as a guest.
 - Private Gmail, Calendar, and Granola tools are offered to the model only in a verified owner's direct message. In groups and for guests they are absent from the tool list, and a direct call is refused.
 - Guests can see free windows inside the bookable hours, request a meeting, and cancel their own booking. Nothing is booked until the owner replies yes; the slot is rechecked at approval. Guest text is sanitised and capped before it reaches a calendar field.
-- Email sending requires a stored pending draft and a separate explicit confirmation message. Direct send is not registered as a model tool.
+- Pingu has no email-send tool. Email approval can create a Gmail draft after a fresh thread check and full read-back; the owner sends it manually in Gmail.
+- Chief-of-staff proposals are delivered only after rechecking a current verified owner direct chat. Commands resolve against the last delivered briefing, approvals are single-use across every owner handle, and sensitive summaries are redacted from proactive text.
 - Deleting a recurring event, an event with other attendees, or several events at once requires a separate explicit confirmation.
 - Once a turn has read email or meeting notes, every side-effecting tool is refused for the rest of that turn except creating a review-only draft, because third-party content never authorises a write. The owner repeats the request as a fresh message.
 - Every calendar write, including guest bookings, is read back and compared field by field with the request before success is reported.

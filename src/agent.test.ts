@@ -14,6 +14,7 @@ const settings: RuntimeSettings = {
   openaiApiKey: "key",
   model: "gpt-5.6-luna",
   telemetry: false,
+  chiefOfStaff: { enabled: true, historyImport: false, workdayStart: "07:00", workdayEnd: "22:00", bufferMinutes: 15, minimumNoticeHours: 0 },
   guest: defaultGuestSettings,
   transcripts: defaultTranscriptSettings,
   scheduling: defaultSchedulingSettings,

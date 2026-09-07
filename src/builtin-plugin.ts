@@ -9,7 +9,6 @@ import { remindersPlugin } from "./capabilities/reminders.js";
 import { schedulingPlugin } from "./capabilities/scheduling.js";
 import { googleCalendarPort, googleGmailPort } from "./google.js";
 import { granolaPort } from "./granola.js";
-import { clearPendingEmail, getPendingEmail, setPendingEmail } from "./pending-emails.js";
 import type { AssistantPlugin } from "./plugins.js";
 import { cancelReminder, countRemindersBySender, createReminder, listReminders } from "./reminders.js";
 import { emailAlertStore } from "./email-alerts.js";
@@ -32,7 +31,7 @@ export function builtInPlugins(
   return [
     clockPlugin(),
     calendarPlugin(googleCalendarPort(settings?.google)),
-    gmailPlugin(gmail, { set: setPendingEmail, get: getPendingEmail, clear: clearPendingEmail }),
+    gmailPlugin(gmail),
     emailAlertsPlugin(gmail, emailAlertStore),
     granolaPlugin(granolaPort(settings?.granolaApiKey)),
     remindersPlugin({ create: createReminder, list: listReminders, cancel: cancelReminder, countBySender: countRemindersBySender }, { guestMaxReminders: settings?.guest?.maxReminders }),

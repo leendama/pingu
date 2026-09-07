@@ -74,9 +74,12 @@ export interface CalendarEventData {
   status?: string | null;
   transparency?: string | null;
   colorId?: string | null;
+  organizer?: { self?: boolean | null; email?: string | null } | null;
   recurringEventId?: string | null;
   hangoutLink?: string | null;
   extendedProperties?: { private?: Record<string, string> | null; shared?: Record<string, string> | null } | null;
+  etag?: string | null;
+  updated?: string | null;
 }
 
 export interface CalendarPort {
@@ -85,7 +88,7 @@ export interface CalendarPort {
   listEvents(params: { timeMin?: string; timeMax?: string; query?: string }): Promise<CalendarEventData[]>;
   getEvent(eventId: string): Promise<CalendarEventData | undefined>;
   insertEvent(requestBody: JsonObject, sendUpdates: "all" | "none", options?: { conferenceDataVersion?: 0 | 1 }): Promise<CalendarEventData>;
-  patchEvent(eventId: string, requestBody: JsonObject, sendUpdates: "all" | "none"): Promise<CalendarEventData>;
+  patchEvent(eventId: string, requestBody: JsonObject, sendUpdates: "all" | "none", options?: { expectedEtag?: string }): Promise<CalendarEventData>;
   deleteEvent(eventId: string, sendUpdates: "all" | "none"): Promise<void>;
 }
 
@@ -109,12 +112,15 @@ interface CalendarTime {
   timeZone?: string | null;
 }
 
-interface RescheduleMove {
+export interface RescheduleMove {
   eventId: string;
   newStart: string;
   newEnd: string;
   /** Explicit group name, or null to opt out of title-based sequence inference. Undefined infers from the title. */
   sequenceGroup?: string | null;
+  /** Optimistic concurrency snapshot used by durable approval proposals. */
+  expectedEtag?: string;
+  expectedUpdated?: string;
 }
 
 interface PreparedMove extends RescheduleMove {
@@ -260,6 +266,8 @@ async function prepareMoves(port: CalendarPort, moves: RescheduleMove[], zones: 
   return Promise.all(moves.map(async (move) => {
     const original = await port.getEvent(move.eventId);
     if (!original) throw new Error(`Calendar event ${move.eventId} was not found.`);
+    if (move.expectedEtag && original.etag !== move.expectedEtag) throw new Error(`Calendar event ${move.eventId} changed after the proposal.`);
+    if (move.expectedUpdated && original.updated !== move.expectedUpdated) throw new Error(`Calendar event ${move.eventId} changed after the proposal.`);
     const originalBounds = eventBounds(original, zones);
     if (!originalBounds) throw new Error(`Calendar event ${move.eventId} has no usable start or end.`);
     const target = eventWindow(move.newStart, move.newEnd, zones);
@@ -344,7 +352,7 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
   const applied: PreparedMove[] = [];
   try {
     for (const move of prepared) {
-      await port.patchEvent(move.eventId, { start: move.startValue, end: move.endValue }, "all");
+      await port.patchEvent(move.eventId, { start: move.startValue, end: move.endValue }, "all", { expectedEtag: move.original.etag ?? undefined });
       applied.push(move);
     }
     for (const move of prepared) {
@@ -358,13 +366,19 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
     for (const move of applied.reverse()) {
       try {
         await port.patchEvent(move.eventId, { start: move.original.start, end: move.original.end }, "all");
+        const restored = await port.getEvent(move.eventId);
+        if (!restored || !sameCalendarTime(restored.start, move.original.start!, zones) || !sameCalendarTime(restored.end, move.original.end!, zones)) {
+          rollbackFailures.push(move.eventId);
+        }
       } catch {
         rollbackFailures.push(move.eventId);
       }
     }
     const detail = error instanceof Error ? error.message : String(error);
     const rollback = rollbackFailures.length ? ` Rollback also failed for: ${rollbackFailures.join(", ")}.` : " All applied moves were rolled back.";
-    throw new Error(`${detail}${rollback}`);
+    const wrapped = new Error(`${detail}${rollback}`);
+    if (typeof error === "object" && error && "code" in error) (wrapped as Error & { code?: number }).code = Number(error.code);
+    throw wrapped;
   }
 
   const deleted: string[] = [];
@@ -386,6 +400,39 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
 export function searchSummary(event: CalendarEventData): Omit<CalendarEventData, "description"> {
   const { description: _description, ...rest } = event;
   return rest;
+}
+
+/** Shared verified move path for both model tools and approval-ledger execution. */
+export async function applyVerifiedCalendarMovePlan(
+  port: CalendarPort,
+  moves: RescheduleMove[],
+  duplicateIds: string[],
+  timezone: string,
+  options: { bufferMinutes?: number } = {},
+): Promise<{ moved: number; deletedDuplicates: number }> {
+  if (new Set(duplicateIds).size !== duplicateIds.length) throw new Error("Each duplicate event ID can appear only once.");
+  const movedIds = new Set(moves.map((move) => move.eventId));
+  if (duplicateIds.some((eventId) => movedIds.has(eventId))) throw new Error("An event cannot be both moved and deleted as a duplicate.");
+  const zones = await calendarZones(port, timezone);
+  const prepared = await prepareMoves(port, moves, zones);
+  for (const eventId of duplicateIds) {
+    if (!await port.getEvent(eventId)) throw new Error(`Duplicate calendar event ${eventId} was not found. Nothing was changed.`);
+  }
+  await validateMovePlan(port, prepared, new Set(duplicateIds), zones);
+  const bufferMs = Math.max(0, options.bufferMinutes ?? 0) * 60_000;
+  if (bufferMs > 0) {
+    for (let left = 0; left < prepared.length; left += 1) {
+      for (let right = left + 1; right < prepared.length; right += 1) {
+        const a = prepared[left]!;
+        const b = prepared[right]!;
+        if (a.startMs < b.endMs + bufferMs && b.startMs < a.endMs + bufferMs) throw new Error(`Planned moves for ${a.eventId} and ${b.eventId} do not leave the required buffer.`);
+      }
+    }
+    const expanded = prepared.map((move) => ({ ...move, startMs: move.startMs - bufferMs, endMs: move.endMs + bufferMs }));
+    const conflict = await busyConflict(port, expanded, new Set([...moves.map((move) => move.eventId), ...duplicateIds]), zones);
+    if (conflict) throw new Error(`Move for ${conflict.window.eventId} does not leave the required buffer around ${conflict.event.id}.`);
+  }
+  return applyMovePlan(port, prepared, duplicateIds, zones);
 }
 
 export function calendarPlugin(port: CalendarPort): PinguPlugin {

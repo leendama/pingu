@@ -4,7 +4,7 @@ Pingu is guided self-hosting: a few commands, a browser wizard, and one Google C
 
 ## Run it on your Mac
 
-You need Node.js 22 or newer and a [Photon](https://app.photon.codes) project with an iMessage line attached.
+You need Node.js 22.5 or newer and a [Photon](https://app.photon.codes) project with an iMessage line attached.
 
 ```bash
 npm install
@@ -63,6 +63,18 @@ Your browser opens for approval. The token is saved in `data/google-token.json`.
 **The seven-day trap.** While the OAuth app's publishing status is **Testing**, Google expires every sign-in after seven days and Pingu will report "The Google sign-in is no longer valid" each week. Set the app to **In production** on the consent screen. You do not need Google verification for your own use; Google shows an "unverified app" screen once during sign-in, which is fine.
 
 Guest bookings add a Google Meet link by default. That uses the same calendar permission; no extra scope is needed.
+
+## Turn on the chief of staff
+
+It is enabled by default. Pingu reviews newly arrived inbox mail and sends one concise decision list at 9am in `ASSISTANT_TIMEZONE`. It can prepare Gmail drafts and same-day calendar move plans. Nothing is created or moved until you reply with an approval. Pingu never sends email; you send the finished draft from Gmail.
+
+Set `PINGU_CHIEF_OF_STAFF=false` to turn it off. The setup wizard has the same switch.
+
+Planning defaults to 7am to 10pm, a 15-minute buffer, and no minimum notice. Change those in the wizard or set `PINGU_CHIEF_OF_STAFF_WORK_HOURS`, `PINGU_CHIEF_OF_STAFF_BUFFER_MINUTES`, and `PINGU_CHIEF_OF_STAFF_MINIMUM_NOTICE_HOURS`.
+
+Historical learning is separate. Enable **Offer a one-time history-learning preview** in the wizard, or set `PINGU_CHIEF_OF_STAFF_HISTORY_IMPORT=true`. Pingu first texts you the exact date range, item counts, and which model provider will receive the bounded evidence. Nothing is imported until you approve that proposal in iMessage. It reads up to 20 full inbox messages and 20 full sent messages from the approved range, trims each body to 2,500 characters for this job, and uses up to 200 calendar events. It stores only compact preference rules in the local ledger. Leave it off if you do not want historical account data used for model judgement.
+
+Approval replies use the latest briefing: `approve 1`, `show 1`, `why 1`, `ignore 1`, or `not now Friday 1`. Email approval creates and verifies a Gmail draft. Calendar approval rechecks the source events, conflicts, durations, buffer, working hours, and sequence order before moving anything. Send `preferences` to see learned rules and `forget preference 1` to delete one.
 
 ## Use a local model
 
@@ -164,7 +176,7 @@ Read the CHANGELOG entry first; a release notes any change to the data files. Th
 ## Delete data
 
 - Ask Pingu to forget the current chat.
-- `npm run reset-data -- --yes` or the **Delete all Pingu data** button on the setup page removes transcripts, reminders, alerts, drafts, guest records, verified owners, and booking requests. Credentials are kept.
+- `npm run reset-data -- --yes` or the **Delete all Pingu data** button on the setup page removes transcripts, reminders, alerts, drafts, guest records, verified owners, booking requests, proposals, learned preferences, briefing records, and the Gmail history cursor. Credentials are kept.
 - **Hosted (wizard):** remove `PHOTON_DATA_DIR` or the `pingu-data` volume to drop the encrypted credentials too.
 - **Local (.env):** the data directory holds only the Google token. Delete `.env` and `credentials.json` yourself to remove the rest.
 - Ids in `PINGU_OWNER_SENDER_IDS` stay owners after any reset until you remove them from the environment.

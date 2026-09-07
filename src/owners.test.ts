@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CLAIM_ATTEMPTS_PER_DAY, CLAIM_CODE_TTL_MS, activeClaimCode, generateClaimCode, hasVerifiedOwner, isOwnerSender, issueClaimCode,
-  listOwners, looksLikeClaimCode, normaliseClaimText, ownerSpaceIds, recordOwnerSpace, redeemClaimCode, removeOwner, resolveSenderRole,
+  listOwners, looksLikeClaimCode, normaliseClaimText, onOwnerRemoved, ownerSpaceIds, recordOwnerSpace, redeemClaimCode, removeOwner, resolveSenderRole,
 } from "./owners.js";
 
 let directory: string;
@@ -66,6 +66,16 @@ describe("claim codes", () => {
     expect(await removeOwner("x")).toBe(true);
     expect(await removeOwner("x")).toBe(false);
     expect(await resolveSenderRole("x")).toBe("guest");
+  });
+
+  it("notifies runtime services with the revoked owner chat", async () => {
+    const claim = await issueClaimCode(0);
+    await redeemClaimCode(claim.code, { senderId: "revoked", spaceId: "dm-revoked" }, 1);
+    const removed: string[] = [];
+    const stop = onOwnerRemoved((owner) => { if (owner.spaceId) removed.push(owner.spaceId); });
+    await removeOwner("revoked");
+    stop();
+    expect(removed).toEqual(["dm-revoked"]);
   });
 
   it("limits claim attempts per sender per day", async () => {

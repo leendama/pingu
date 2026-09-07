@@ -121,6 +121,12 @@ function setup(config?: AssistantConfig, message = "", checks?: ConnectionCheck[
   <h2>Model</h2>${modelSection(config, local)}
   <h2>Google</h2>${googleSection(config, callback)}
   <h2>Granola (optional)</h2><label>API key</label><input type="password" name="granolaApiKey" placeholder="${config ? "Leave blank to keep saved value" : ""}">
+  <h2>Chief of staff</h2><small>Pingu checks new inbox mail and sends a 9am approval list. It can draft replies and propose a shuffled day. It never sends email, and it changes nothing until you approve.</small>
+  <label><input name="chiefOfStaffEnabled" type="checkbox" ${config?.chiefOfStaffEnabled !== false ? "checked" : ""}> Enable approval-first chief of staff</label>
+  <label>Planning hours</label><input name="chiefOfStaffWorkHours" value="${escapeHtml(config?.chiefOfStaffWorkHours ?? "07:00-22:00")}" placeholder="07:00-22:00 or 24h">
+  <label>Planning buffer (minutes)</label><input name="chiefOfStaffBufferMinutes" type="number" min="0" max="120" value="${escapeHtml(config?.chiefOfStaffBufferMinutes ?? 15)}">
+  <label>Minimum notice before a moved block (hours)</label><input name="chiefOfStaffMinimumNoticeHours" type="number" min="0" max="24" step="0.5" value="${escapeHtml(config?.chiefOfStaffMinimumNoticeHours ?? 0)}">
+  <label><input name="chiefOfStaffHistoryImport" type="checkbox" ${config?.chiefOfStaffHistoryImport ? "checked" : ""}> Offer a one-time history-learning preview</label><small>Pingu texts you the date range, item count, and model-provider disclosure. The import starts only after you approve that preview.</small>
   <h2>Guests and bookings</h2><small>Anyone can text the number. Guests can chat, see your bookable windows, and request a meeting you approve by replying yes.</small>
   <label>Bookable hours</label><input name="bookableHours" value="${escapeHtml(config?.bookableHours ?? "09:00-17:00")}" placeholder="09:00-17:00 or 24h">
   <label>Bookable days</label><select name="bookableDays"><option value="weekdays" ${(config?.bookableDays ?? "weekdays") === "weekdays" ? "selected" : ""}>Weekdays</option><option value="all" ${config?.bookableDays === "all" ? "selected" : ""}>Every day</option></select>
@@ -134,7 +140,7 @@ function setup(config?: AssistantConfig, message = "", checks?: ConnectionCheck[
   ${config && !config.google.refreshToken ? `<a class="button" href="/auth/google">Connect Google</a>` : ""}${config?.google.refreshToken ? "<p class=\"status\">Google is connected.</p>" : ""}
   ${config ? `<form method="post" action="/setup/test"><button>Test connections</button></form>` : ""}
   ${owners ? renderOwners(owners) : ""}
-  <h2>Delete all Pingu data</h2><small>Removes every chat transcript, reminder, alert, pending draft, guest record, verified owner, and booking request. Credentials stay so you are not signed out.</small><form method="post" action="/setup/data/delete"><label>Type DELETE to confirm</label><input name="confirm" autocomplete="off"><button class="danger">Delete data</button></form>`);
+  <h2>Delete all Pingu data</h2><small>Removes every chat transcript, reminder, alert, pending draft, guest record, verified owner, booking request, proposal, and learned preference. Credentials stay so you are not signed out.</small><form method="post" action="/setup/data/delete"><label>Type DELETE to confirm</label><input name="confirm" autocomplete="off"><button class="danger">Delete data</button></form>`);
 }
 
 /** The client the wizard's OAuth flow uses. The shared installed-app client can only redirect to a loopback address. */
@@ -221,6 +227,11 @@ export function createSetupServer(onReady: (config: AssistantConfig) => Promise<
           refreshToken: (body.googleClientId?.trim() || "") === (existing?.google.clientId ?? "") ? existing?.google.refreshToken : undefined,
         },
         telemetry: body.telemetry === "on",
+        chiefOfStaffEnabled: body.chiefOfStaffEnabled === "on",
+        chiefOfStaffHistoryImport: body.chiefOfStaffHistoryImport === "on",
+        chiefOfStaffWorkHours: body.chiefOfStaffWorkHours || undefined,
+        chiefOfStaffBufferMinutes: body.chiefOfStaffBufferMinutes || undefined,
+        chiefOfStaffMinimumNoticeHours: body.chiefOfStaffMinimumNoticeHours || undefined,
         meetLink: body.meetLink === "on",
         guestDailyMessageCap: body.guestDailyMessageCap || undefined,
         transcriptRetentionDays: body.transcriptRetentionDays ?? undefined,

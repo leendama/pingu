@@ -67,3 +67,13 @@ First public release.
 
 - The wizard shows the claim code, lists verified owners, and has settings for the model endpoint, bookable hours, guest caps, retention, and telemetry.
 - `npm run doctor` runs the provider capability probe and warns about Google OAuth apps left in Testing mode.
+
+### Approval-first chief of staff
+
+- New inbox mail is reviewed from Gmail's incremental history stream. Routine actions wait for the daily review; urgent items can interrupt immediately. Cursor expiry gets a bounded replay and failures are visible.
+- A timezone-aware 9am briefing carries durable numbered proposals. Exact owner commands approve, edit, show, explain, defer, ignore, complete, and teach preferences without relying on model conversation memory.
+- Email approval creates a draft in the original Gmail thread, verifies recipients, subject, body, and thread, and leaves sending to the owner in Gmail.
+- Email review uses the full current thread plus selected sent-mail examples. The daily review scans recent unread inbox candidates before it builds the decision list.
+- Calendar proposals list every move, support sequential work, enforce working hours, notice, and buffers, reject conflicts and stale source events, use conditional writes, roll back failures, and verify the final events.
+- Proposal and preference state stays in a versioned local SQLite ledger. Owner revocation invalidates outstanding work. Closed records follow the transcript retention period, and inferred rules have review and expiry dates.
+- Historical preference learning is a separate opt-in preview. The owner sees the date range, counts, and provider disclosure before approval starts a bounded import with visible progress.

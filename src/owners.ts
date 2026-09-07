@@ -43,6 +43,13 @@ const store = new JsonFileStore<OwnersState>(
   },
 );
 
+const removalListeners = new Set<(owner: OwnerRecord) => void | Promise<void>>();
+
+export function onOwnerRemoved(listener: (owner: OwnerRecord) => void | Promise<void>): () => void {
+  removalListeners.add(listener);
+  return () => removalListeners.delete(listener);
+}
+
 export const CLAIM_CODE_TTL_MS = 60 * 60 * 1000;
 const CLAIM_PREFIX = "PINGU-";
 /** No 0/O/1/I so a code read from a screen cannot be mistyped. */
@@ -150,12 +157,16 @@ export async function recordOwnerSpace(senderId: string, spaceId: string, now = 
 }
 
 export async function removeOwner(senderId: string): Promise<boolean> {
-  return store.update((state) => {
+  let removedOwner: OwnerRecord | undefined;
+  const removed = await store.update((state) => {
+    removedOwner = state.owners.find((owner) => owner.senderId === senderId);
     const remaining = state.owners.filter((owner) => owner.senderId !== senderId);
     if (remaining.length === state.owners.length) return { result: false, changed: false };
     state.owners = remaining;
     return { result: true, changed: true };
   });
+  if (removed && removedOwner) await Promise.all([...removalListeners].map((listener) => listener(removedOwner!)));
+  return removed;
 }
 
 export async function isOwnerSender(senderId: string | undefined): Promise<boolean> {

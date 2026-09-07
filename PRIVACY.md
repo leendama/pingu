@@ -11,6 +11,7 @@ Everything under `PHOTON_DATA_DIR` (default `data/`):
 - Guest counters (per-sender daily message counts and the global daily token total).
 - Verified owner ids and the active claim code.
 - Meeting requests, their approvals, expiry, and outcomes.
+- Chief-of-staff proposals, briefing delivery state, Gmail history cursor, and learned preference rules.
 - The encrypted configuration and Google tokens.
 
 Files are written with owner-only permissions. Transcripts are trimmed to the retention window (`PINGU_TRANSCRIPT_RETENTION_DAYS`, default 30 days) and to a size cap on every write.
@@ -20,6 +21,7 @@ Files are written with owner-only permissions. Transcripts are trimmed to the re
 - **Photon.** Every iMessage in and out is relayed by Photon's service. Photon sees message text, sender ids, and chat ids. Spectrum SDK telemetry is off unless you turn it on.
 - **Your model provider.** Each turn sends the system instructions, the conversation transcript for that chat, and the results of any tools the model called. With OpenAI that includes calendar events, email bodies, or meeting notes the model asked for. Pingu sends OpenAI requests with `store: false`. With Ollama or LM Studio, that traffic stays on your hardware.
 - **Google.** Calendar and Gmail calls go to Google with your OAuth token. When you connect through Pingu's shared Google app, that token is minted for Pingu's registration but stored only on your machine; nothing about your account reaches the maintainers.
+- **Chief of staff.** Proposal state and learned preference rules stay in the local SQLite data file. Closed proposals and briefing records use the transcript retention period. Inferred history rules expire after 90 days unless reinforced, and other rules carry a review date. You can delete any rule with `forget preference N` or reset runtime data. Email and calendar evidence needed for a judgement goes to your configured model provider. Historical learning is off until you enable it in setup or with `PINGU_CHIEF_OF_STAFF_HISTORY_IMPORT=true`. Enabling it only creates an iMessage preview. The bounded import starts after your approval and sends up to 20 inbox bodies, 20 sent bodies, and 200 calendar event summaries from the approved range to that provider.
 - **Granola.** Note reads go to Granola with your API key.
 
 Pingu itself has no server and collects nothing.

@@ -4,12 +4,12 @@ import { deleteAllPinguData, PINGU_DATA_FILES } from "./transcripts.js";
 
 async function main(): Promise<void> {
   if (!process.argv.includes("--yes")) {
-    console.log(`This removes every chat transcript and these files under ${dataPath("")}:\n  ${PINGU_DATA_FILES.join("\n  ")}\n`);
+    console.log(`This clears every chat transcript and these runtime stores under ${dataPath("")}:\n  ${PINGU_DATA_FILES.join("\n  ")}\n`);
     console.log("Encrypted credentials and Google tokens are kept. Run again with --yes to delete.");
     return;
   }
   const result = await deleteAllPinguData();
-  console.log(`Deleted ${result.transcripts} transcript(s) and ${result.files.length} data file(s).`);
+  console.log(`Deleted ${result.transcripts} transcript(s) and cleared ${result.files.length} runtime data store(s).`);
 }
 
 void main().catch((error) => {

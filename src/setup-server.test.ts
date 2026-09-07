@@ -99,7 +99,10 @@ describe("setup recovery", () => {
     expect(await health.json()).toMatchObject({ ok: true, configured: false, googleConnected: false });
     const setup = await fetch(`${base}/setup`, { headers: { cookie: await loginCookie(base) } });
     expect(setup.status).toBe(200);
-    expect(await setup.text()).toContain("Set up your assistant");
+    const html = await setup.text();
+    expect(html).toContain("Set up your assistant");
+    expect(html).toContain("Planning buffer (minutes)");
+    expect(html).toContain("Offer a one-time history-learning preview");
   });
 });
 
@@ -169,6 +172,19 @@ describe("setup save", () => {
     const html = await response.text();
     expect(html).toContain("Saved, but the assistant could not start: Photon authentication failed");
     expect(html).not.toContain("Saved and running.");
+  });
+
+  it("saves chief-of-staff planning limits and the history preview choice", async () => {
+    const { base } = await startServer(async () => ({ started: false, reason: "already-running" }));
+    await saveConfig(savedConfig);
+    const { loadConfig } = await import("./config.js");
+    const response = await fetch(`${base}/setup/save`, {
+      method: "POST",
+      headers: { cookie: await loginCookie(base) },
+      body: saveBody({ chiefOfStaffEnabled: "on", chiefOfStaffHistoryImport: "on", chiefOfStaffWorkHours: "08:30-19:00", chiefOfStaffBufferMinutes: "25", chiefOfStaffMinimumNoticeHours: "1.5" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await loadConfig()).toMatchObject({ chiefOfStaffEnabled: true, chiefOfStaffHistoryImport: true, chiefOfStaffWorkHours: "08:30-19:00", chiefOfStaffBufferMinutes: 25, chiefOfStaffMinimumNoticeHours: 1.5 });
   });
 });
 

@@ -41,6 +41,10 @@ const bookableDays = z.string().trim().default("weekdays").refine((value) => {
   }
 }, "Bookable days must be weekdays, all, or day numbers 0-6.");
 
+const chiefWorkHours = z.string().trim().default("07:00-22:00").refine((value) => {
+  try { parseBookableHours(value); return true; } catch { return false; }
+}, "Chief-of-staff work hours must look like 07:00-22:00 or 24h.");
+
 export const assistantConfigSchema = z.object({
   assistantName: z.string().trim().min(1).max(40).default("Pingu"),
   ownerName: z.string().trim().min(1).max(80),
@@ -59,6 +63,11 @@ export const assistantConfigSchema = z.object({
     refreshToken: z.string().optional(),
   }).refine((google) => Boolean(google.clientId) === Boolean(google.clientSecret), "Enter both the Google client ID and secret, or leave both blank to use Pingu's shared Google app."),
   telemetry: z.boolean().default(false),
+  chiefOfStaffEnabled: z.boolean().default(true),
+  chiefOfStaffHistoryImport: z.boolean().default(false),
+  chiefOfStaffWorkHours: chiefWorkHours,
+  chiefOfStaffBufferMinutes: z.coerce.number().int().min(0).max(120).default(15),
+  chiefOfStaffMinimumNoticeHours: z.coerce.number().min(0).max(24).default(0),
   guestDailyMessageCap: z.coerce.number().int().min(1).max(500).default(20),
   transcriptRetentionDays: z.coerce.number().int().min(0).max(3650).default(30),
   bookableHours,

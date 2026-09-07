@@ -23,6 +23,7 @@ export interface RuntimeSettings {
   };
   /** Spectrum SDK telemetry. Off unless the owner opts in. */
   telemetry: boolean;
+  chiefOfStaff: { enabled: boolean; historyImport: boolean; workdayStart: string; workdayEnd: string; bufferMinutes: number; minimumNoticeHours: number };
   guest: GuestSettings;
   transcripts: TranscriptSettings;
   scheduling: SchedulingSettings;
@@ -58,6 +59,7 @@ export function settingsFromConfig(config: AssistantConfig, redirectUri?: string
   if (!config.google.refreshToken) throw new Error("Google must be connected before the assistant can start.");
   const client = resolveGoogleClient(config.google);
   const hours = parseBookableHours(config.bookableHours);
+  const chiefHours = parseBookableHours(config.chiefOfStaffWorkHours);
   return {
     assistantName: config.assistantName,
     ownerName: config.ownerName,
@@ -75,6 +77,7 @@ export function settingsFromConfig(config: AssistantConfig, redirectUri?: string
       redirectUri,
     },
     telemetry: config.telemetry,
+    chiefOfStaff: { enabled: config.chiefOfStaffEnabled, historyImport: config.chiefOfStaffHistoryImport, workdayStart: chiefHours.start, workdayEnd: chiefHours.end, bufferMinutes: config.chiefOfStaffBufferMinutes, minimumNoticeHours: config.chiefOfStaffMinimumNoticeHours },
     guest: { ...defaultGuestSettings, dailyMessageCap: config.guestDailyMessageCap },
     transcripts: { ...defaultTranscriptSettings, retentionDays: config.transcriptRetentionDays },
     scheduling: {
@@ -101,6 +104,7 @@ export function settingsFromEnvironment(): RuntimeSettings {
       }
     : undefined;
   const hours = parseBookableHours(process.env.PINGU_BOOKABLE_HOURS);
+  const chiefHours = parseBookableHours(process.env.PINGU_CHIEF_OF_STAFF_WORK_HOURS || "07:00-22:00");
   const defaultDuration = envNumber("PINGU_DEFAULT_MEETING_MINUTES", defaultSchedulingSettings.defaultDurationMinutes, { min: 5, max: 480 });
   return {
     assistantName: process.env.ASSISTANT_NAME || "Pingu",
@@ -114,6 +118,14 @@ export function settingsFromEnvironment(): RuntimeSettings {
     granolaApiKey: process.env.GRANOLA_API_KEY,
     google,
     telemetry: envFlag("PINGU_TELEMETRY", false),
+    chiefOfStaff: {
+      enabled: envFlag("PINGU_CHIEF_OF_STAFF", true),
+      historyImport: envFlag("PINGU_CHIEF_OF_STAFF_HISTORY_IMPORT", false),
+      workdayStart: chiefHours.start,
+      workdayEnd: chiefHours.end,
+      bufferMinutes: envNumber("PINGU_CHIEF_OF_STAFF_BUFFER_MINUTES", 15, { min: 0, max: 120 }),
+      minimumNoticeHours: envNumber("PINGU_CHIEF_OF_STAFF_MINIMUM_NOTICE_HOURS", 0, { min: 0, max: 24 }),
+    },
     guest: {
       dailyMessageCap: envNumber("PINGU_GUEST_DAILY_MESSAGE_CAP", defaultGuestSettings.dailyMessageCap, { min: 1, max: 500 }),
       dailyTokenBudget: envNumber("PINGU_GUEST_DAILY_TOKEN_BUDGET", defaultGuestSettings.dailyTokenBudget, { min: 1000, max: 100_000_000 }),

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import { appendTranscript, cleanupTranscripts, compactEntries, deleteAllPinguData, forgetTranscript, readTranscript, type TranscriptEntry } from "./transcripts.js";
+import { ProposalLedger } from "./proposals.js";
 
 let directory: string;
 const settings = { retentionDays: 30, maxEntries: 80, maxChars: 60_000 };
@@ -75,6 +76,19 @@ describe("transcript files", () => {
     expect(result.transcripts).toBe(1);
     expect(result.files).toEqual(["reminders.json"]);
     expect(await readTranscript("space-b", settings, now)).toEqual([]);
+  });
+
+  it("clears the chief-of-staff ledger while the running process still has it open", async () => {
+    const ledger = new ProposalLedger(join(directory, "chief-of-staff.sqlite"));
+    ledger.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Reply", detail: "Draft", payload: {}, evidence: { sourceType: "gmail", rationale: "Question", confidence: 0.9 }, expiresAt: "2030-01-01T00:00:00.000Z" });
+    ledger.recordPreference({ key: "email:style", value: "Brief", confidence: 0.8, evidenceCount: 2 }, new Date("2029-01-01T00:00:00.000Z"));
+    ledger.setMetadata("chief-of-staff:gmail-history-id", "cursor");
+    const result = await deleteAllPinguData();
+    expect(result.files).toContain("chief-of-staff.sqlite");
+    expect(ledger.listOpen("owner", new Date("2029-01-01T00:00:00.000Z"))).toEqual([]);
+    expect(ledger.preferences(new Date("2029-01-01T00:00:00.000Z"))).toEqual([]);
+    expect(ledger.getMetadata("chief-of-staff:gmail-history-id")).toBeUndefined();
+    ledger.close();
   });
 
   it("tolerates a corrupt transcript file by starting fresh", async () => {

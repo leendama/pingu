@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/leendama/pingu/actions/workflows/ci.yml/badge.svg)](https://github.com/leendama/pingu/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Node 22+](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](package.json)
+[![Node 22.5+](https://img.shields.io/badge/node-%3E%3D22.5-brightgreen.svg)](package.json)
 [![Self-hosted](https://img.shields.io/badge/hosting-self--hosted-6b4fbb.svg)](docs/SETUP.md)
 
 <img width="150" height="300" alt="Pingu" src="https://github.com/user-attachments/assets/7c580305-9671-44cb-ad26-16c2f2d12cc9" />
@@ -18,7 +18,9 @@ Pingu is a self-hosted assistant you text on iMessage. It reads and manages your
 **For you, the owner**
 
 - Calendar: search, create, move, recolour, edit, and delete events. Moves are conflict-aware and verified.
-- Gmail: search, read full messages, draft, and send after you confirm the exact draft.
+- Gmail: search, read full messages, and create verified drafts for you to send manually.
+- Approval-first chief of staff: review full email threads, prepare drafts, and send a concise 9am decision list.
+- Daily calendar planning: propose a complete, conflict-checked reshuffle within your hours and buffers, then apply it only after your approval.
 - Email alerts: a text when a chosen sender emails you.
 - Granola: list and read meeting notes.
 - Reminders, tapbacks, read receipts, typing indicators, polls, rich links, contact cards, voice replies.
@@ -52,7 +54,7 @@ Pingu stores its state and conversation history on your machine. Messages are re
 
 ## Set it up
 
-You need Node.js 22 or newer, a [Photon](https://app.photon.codes) project with an iMessage line, a Google account, and either an OpenAI API key or a local model that supports function calling.
+You need Node.js 22.5 or newer, a [Photon](https://app.photon.codes) project with an iMessage line, a Google account, and either an OpenAI API key or a local model that supports function calling.
 
 ```sh
 npm install
@@ -111,7 +113,7 @@ Forget one chat by asking Pingu to. Delete everything with `npm run reset-data -
 
 ## Email signature
 
-Every email Pingu sends ends with "this email was composed by Pingu, noot noot" and a link to this repository. It is part of the product and cannot be switched off.
+Every email Pingu drafts ends with "this email was composed by Pingu, noot noot" and a link to this repository. Pingu never sends the draft. You review and send it in Gmail.
 
 ## Extensions and verification
 

@@ -41,6 +41,12 @@ export interface GmailMessage extends GmailMessageSummary {
   bcc?: string | null;
   messageIdHeader?: string | null;
   references?: string | null;
+  /** RFC 3834 Auto-Submitted header, retained for deterministic automation filtering. */
+  autoSubmitted?: string | null;
+  precedence?: string | null;
+  /** Mailing-list headers retained so bulk mail can be filtered before review. */
+  listId?: string | null;
+  listUnsubscribe?: string | null;
   body: string;
   /** True when the body was cut at GMAIL_BODY_CHAR_LIMIT. */
   truncated?: boolean;

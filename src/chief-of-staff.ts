@@ -5,7 +5,9 @@ import { ProposalLedger, type Proposal, type PreferenceRule } from "./proposals.
 import { zonedTimestamp } from "./scheduling.js";
 
 export interface EmailReview {
-  actionable: boolean;
+  outcome?: "ignore" | "fyi" | "draft" | "decision";
+  /** Compatibility for third-party reviewers; built-in review always returns outcome. */
+  actionable?: boolean;
   interrupt: boolean;
   summary: string;
   rationale: string;
@@ -56,6 +58,23 @@ function sensitiveEmail(message: GmailMessage): boolean {
   return /\b(medical|diagnosis|health|bank|account number|tax|legal|lawyer|password|security code|salary|payroll)\b/.test(text);
 }
 
+/** Bulk and promotional mail is not a chief-of-staff task unless the owner explicitly asks for it. */
+export function isBulkMail(message: GmailMessage): boolean {
+  if (message.labelIds?.some((label) => label === "CATEGORY_PROMOTIONS" || label === "CATEGORY_UPDATES")) return true;
+  if (/\b(?:bulk|list|junk)\b/i.test(message.precedence ?? "")) return true;
+  return Boolean(message.listId?.trim() || message.listUnsubscribe?.trim());
+}
+
+/** Automatic responders never need an owner decision or a drafted reply. */
+export function isAutomaticReply(message: GmailMessage): boolean {
+  const autoSubmitted = message.autoSubmitted?.trim().toLowerCase();
+  if (autoSubmitted && autoSubmitted !== "no") return true;
+  const subject = message.subject?.trim().toLowerCase() ?? "";
+  if (/^(?:automatic|auto)\s*(?:reply|response)\b|^(?:out of office|ooo|away from (?:the )?office|vacation responder)\b/.test(subject)) return true;
+  const sender = headerAddress(message.from)?.split("@")[0]?.toLowerCase() ?? "";
+  return /^(?:mailer-daemon|postmaster|auto(?:matic)?[-_.]?reply)$/.test(sender);
+}
+
 function deterministicallyUrgent(message: GmailMessage, now: Date, timezone: string): boolean {
   const text = `${message.subject ?? ""}\n${message.snippet ?? ""}\n${message.body.slice(0, 2_000)}`.toLowerCase();
   const today = localDate(now.getTime(), timezone);
@@ -63,14 +82,24 @@ function deterministicallyUrgent(message: GmailMessage, now: Date, timezone: str
     || text.includes(today);
 }
 
+function concise(value: string, maximum = 180): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length <= maximum ? normalized : `${normalized.slice(0, maximum - 1).trimEnd()}…`;
+}
+
 function formatProposal(proposal: Proposal, ordinal: number): string {
   const boundary = proposal.kind === "email_draft"
-    ? "Approve to create this Gmail draft. Pingu will not send it."
+    ? `Reply: approve ${ordinal}, show ${ordinal}, or ignore ${ordinal}. I only create a Gmail draft.`
+    : proposal.kind === "email_fyi"
+      ? `Reply: got it ${ordinal} or show ${ordinal}.`
+      : proposal.kind === "email_decision"
+        ? `Reply: show ${ordinal}, done ${ordinal}, not now <day> ${ordinal}, or ignore ${ordinal}.`
     : proposal.kind === "calendar_move"
       ? `Approve to apply ${(proposal.payload as { moves?: unknown[] }).moves?.length ?? 0} calendar change(s).`
       : "Approve to start this one-time history import.";
-  const showDetail = proposal.kind === "history_import" || (proposal.kind === "calendar_move" && !proposal.summary.startsWith("Sensitive"));
-  return [`${ordinal}. ${proposal.summary}`, proposal.evidence.rationale, ...(showDetail ? [proposal.detail] : []), boundary].join("\n");
+  const rationale = proposal.kind === "email_draft" || proposal.kind === "email_decision" ? concise(proposal.evidence.rationale, 120) : undefined;
+  const showDetail = proposal.kind === "history_import" || proposal.kind === "calendar_move";
+  return [`${ordinal}. ${concise(proposal.summary)}`, rationale, ...(showDetail ? [concise(proposal.detail)] : []), boundary].filter(Boolean).join("\n");
 }
 
 function calendarEvidence(events: unknown[]): unknown[] {
@@ -124,7 +153,7 @@ function conciseTimestamp(value: string, timezone: string): string {
 
 export function formatBriefing(proposals: Proposal[]): string {
   if (proposals.length === 0) return "Nothing worth your attention right now.";
-  return ["Quick chief-of-staff check:", ...proposals.map((proposal, index) => formatProposal(proposal, index + 1)), "Reply: approve 1, edit 1, show 1, why 1, not now Friday 1, or ignore 1."].join("\n\n");
+  return ["Quick chief-of-staff check:", ...proposals.map((proposal, index) => formatProposal(proposal, index + 1))].join("\n\n");
 }
 
 export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
@@ -153,13 +182,26 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     const sourceId = message.id ?? messageId;
     const reviewedKey = `chief-of-staff:email-reviewed:${sourceId}`;
     if (deps.ledger.getMetadata(reviewedKey)) return;
+    if (isAutomaticReply(message)) {
+      deps.ledger.setMetadata(reviewedKey, now().toISOString());
+      return;
+    }
+    if (isBulkMail(message)) {
+      deps.ledger.setMetadata(reviewedKey, now().toISOString());
+      return;
+    }
     const recipient = headerAddress(message.from);
     if (!recipient) {
       deps.ledger.setMetadata(reviewedKey, now().toISOString());
       return;
     }
     const sourceKey = `gmail:${message.threadId ?? message.id ?? messageId}`;
-    const existing = ownerSpaces.map((ownerSpaceId) => ({ ownerSpaceId, proposal: deps.ledger.findSourceVersion(ownerSpaceId, "email_draft", sourceKey, sourceId) }));
+    const existing = ownerSpaces.map((ownerSpaceId) => ({
+      ownerSpaceId,
+      proposal: (["email_draft", "email_fyi", "email_decision"] as const)
+        .map((kind) => deps.ledger.findSourceVersion(ownerSpaceId, kind, sourceKey, sourceId))
+        .find((proposal): proposal is Proposal => Boolean(proposal)),
+    }));
     if (existing.every(({ proposal }) => Boolean(proposal))) {
       if (options.interrupt) {
         for (const { ownerSpaceId, proposal } of existing) {
@@ -182,33 +224,32 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     const review = await deps.reviewEmail({ message, thread: thread.slice(-20), sentContext }, preferences);
     const alwaysSurface = preferences.some((rule) => rule.key === `${contactKey}:always_surface`);
     const lowPriority = preferences.some((rule) => rule.key === `${contactKey}:not_important`);
-    if (!review.actionable || !review.draftBody?.trim()) {
-      if ((urgent || alwaysSurface) && options.interrupt) {
-        const notice = sensitiveEmail(message)
-          ? `${urgent ? "Urgent sensitive email" : "Sensitive email"} needs your review.`
-          : `${urgent ? "Urgent email" : "Email to review"}: ${message.subject || "check Gmail"}`;
-        for (const ownerSpaceId of ownerSpaces) await deps.deliver(ownerSpaceId, notice);
-      }
+    const outcome = review.outcome ?? (review.actionable ? "draft" : "ignore");
+    if (outcome === "ignore" || (outcome === "draft" && !review.draftBody?.trim())) {
       deps.ledger.setMetadata(reviewedKey, now().toISOString());
       return;
     }
     const subject = /^re:/i.test(message.subject ?? "") ? message.subject! : `Re: ${message.subject || "Your email"}`;
     for (const ownerSpaceId of ownerSpaces) {
       const isSensitive = sensitiveEmail(message);
+      const kind = outcome === "draft" ? "email_draft" : outcome === "decision" ? "email_decision" : "email_fyi";
+      const proposalDetail = outcome === "draft"
+        ? review.draftBody!
+        : `${message.subject || "Email"}\n\n${message.snippet || message.body.slice(0, 1_500)}`;
       const proposal = deps.ledger.create({
         ownerSpaceId,
-        kind: "email_draft",
+        kind,
         sourceKey,
-        summary: isSensitive ? "Sensitive email needs your review" : review.summary,
-        detail: review.draftBody,
-        payload: {
+        summary: isSensitive ? `Sensitive: ${review.summary}` : review.summary,
+        detail: proposalDetail,
+        payload: outcome === "draft" ? {
           to: [recipient], cc: [], bcc: [], subject, body: review.draftBody,
           ...(message.threadId ? { threadId: message.threadId } : {}),
           ...(message.id ? { sourceMessageId: message.id } : {}),
           ...(message.messageIdHeader ? { inReplyTo: message.messageIdHeader } : {}),
           ...(message.references || message.messageIdHeader ? { references: [message.references, message.messageIdHeader].filter(Boolean).join(" ") } : {}),
-        },
-        evidence: { sourceType: "gmail", sourceId, contact: recipient, category: "email-reply", ruleIds: preferences.map((rule) => rule.key).slice(0, 20), rationale: isSensitive ? "A sensitive message needs a private decision." : review.rationale, confidence: Math.max(0, Math.min(1, review.confidence)) },
+        } : { messageId: message.id, threadId: message.threadId },
+        evidence: { sourceType: "gmail", sourceId, contact: recipient, category: `email-${outcome}`, ruleIds: preferences.map((rule) => rule.key).slice(0, 20), rationale: review.rationale, confidence: Math.max(0, Math.min(1, review.confidence)) },
         expiresAt: new Date(now().getTime() + 7 * 86_400_000).toISOString(),
       }, now());
       if (options.interrupt && (urgent || alwaysSurface || (review.interrupt && !lowPriority))) {

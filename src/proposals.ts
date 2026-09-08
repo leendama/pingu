@@ -6,7 +6,7 @@ import { dataPath } from "./state.js";
 import { localDate } from "./daily-review.js";
 import { startPoller } from "./poller.js";
 
-export type ProposalKind = "email_draft" | "calendar_move" | "history_import";
+export type ProposalKind = "email_draft" | "email_fyi" | "email_decision" | "calendar_move" | "history_import";
 export type ProposalStatus = "proposed" | "approved" | "executing" | "completed" | "partially_completed" | "rejected" | "ignored" | "deferred" | "expired" | "invalidated" | "failed";
 
 export interface ProposalInput {
@@ -299,6 +299,14 @@ export class ProposalLedger {
     this.db.prepare("INSERT INTO metadata VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 
+  metadataWithPrefix(prefix: string): Array<{ key: string; value: string }> {
+    return this.db.prepare("SELECT key, value FROM metadata WHERE key LIKE ? ORDER BY key ASC").all(`${prefix}%`) as Array<{ key: string; value: string }>;
+  }
+
+  deleteMetadata(key: string): void {
+    this.db.prepare("DELETE FROM metadata WHERE key = ?").run(key);
+  }
+
   recordPreference(rule: Omit<PreferenceRule, "updatedAt">, now = new Date()): PreferenceRule {
     const updatedAt = now.toISOString();
     const reviewAfter = rule.reviewAfter ?? new Date(now.getTime() + 90 * 86_400_000).toISOString();
@@ -342,10 +350,10 @@ export class ProposalLedger {
     let normalized = text.trim();
     if (activeIds.length === 1) {
       if (/^why (?:this|that)\??$/i.test(normalized)) normalized = "why 1";
-      else if (/^(approve|reject|ignore|not important|show|done|always surface)$/i.test(normalized)) normalized = `${normalized} 1`;
+      else if (/^(approve|reject|ignore|not important|show|done|got it|always surface)$/i.test(normalized)) normalized = `${normalized} 1`;
       else if (/^not now\s+(.+)$/i.test(normalized) && !/\s\d+$/.test(normalized)) normalized = `${normalized} 1`;
     }
-    const match = normalized.match(/^(?:(approve|reject|ignore|not important|why|show|done|always surface)\s+(\d+)|not now\s+(.+?)\s+(\d+))$/i);
+    const match = normalized.match(/^(?:(approve|reject|ignore|not important|why|show|done|got it|always surface)\s+(\d+)|not now\s+(.+?)\s+(\d+))$/i);
     if (!match) return undefined;
     const verb = (match[1] ?? "defer").toLowerCase();
     const ordinal = Number(match[2] ?? match[4]);
@@ -357,7 +365,7 @@ export class ProposalLedger {
     if (!proposal || proposal.ownerSpaceId !== ownerSpaceId || proposal.status !== "proposed" || Date.parse(proposal.expiresAt) <= now.getTime()) return undefined;
     if (verb === "why") return { type: "explain", proposal };
     if (verb === "show") return { type: "show", proposal };
-    if (verb === "done") {
+    if (verb === "done" || verb === "got it") {
       this.db.prepare("UPDATE proposals SET status = 'completed', completed_at = ?, outcome = ? WHERE id = ? AND status = 'proposed'").run(now.toISOString(), "The owner said this was already done.", id);
       return { type: "done", proposal: { ...proposal, status: "completed", completedAt: now.toISOString(), outcome: "The owner said this was already done." } };
     }

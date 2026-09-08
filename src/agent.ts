@@ -76,6 +76,11 @@ export function turnInstructions(settings: RuntimeSettings, audience: Pick<ToolR
   return `You are talking to ${settings.ownerName}, the verified owner, in a direct message.`;
 }
 
+/** One mailbox outage should produce one owner notice, not one per email. */
+export function chiefFailureIncidentKey(key: string): string {
+  return key.startsWith("gmail:") ? "gmail" : key;
+}
+
 /** History limits for a guest turn: enough for a scheduling conversation, small enough to fit the turn ceiling. */
 export function guestTranscriptSettings(settings: RuntimeSettings) {
   return {
@@ -167,8 +172,11 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     learnHistory: (input) => learnHistoryWithModel(structuredReviewer, input),
   });
   const reportChiefFailure = async (key: string, text: string): Promise<void> => {
+    // A broken mailbox batch can contain many messages. One clear operational
+    // notice is useful; one per message is an outage turned into iMessage spam.
+    const incidentKey = chiefFailureIncidentKey(key);
     for (const spaceId of await ownerSpaceIds()) {
-      const metadataKey = `chief-of-staff:reported-failure:${key}:${spaceId}`;
+      const metadataKey = `chief-of-staff:reported-failure:${incidentKey}:${spaceId}`;
       if (proposalLedger.getMetadata(metadataKey)) continue;
       await deliverToOwner(proactive, spaceId, text);
       proposalLedger.setMetadata(metadataKey, new Date().toISOString());

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CalendarPort } from "./capabilities/calendar.js";
 import type { GmailPort } from "./capabilities/gmail.js";
-import { createChiefOfStaff } from "./chief-of-staff.js";
+import { createChiefOfStaff, isAutomaticReply, isBulkMail } from "./chief-of-staff.js";
 import { ProposalLedger } from "./proposals.js";
 import { handleProposalCommand } from "./proposal-actions.js";
 
@@ -31,6 +31,48 @@ async function setup() {
 }
 
 describe("chief of staff service", () => {
+  it("ignores automatic replies before they reach the reviewer", async () => {
+    const { ledger, delivered } = await setup();
+    const reviewEmail = vi.fn();
+    const service = createChiefOfStaff({
+      ledger, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner"], deliver: async (_space, text) => { delivered.push(text); }, reviewEmail,
+      gmail: { readMessage: async () => ({ id: "auto", labelIds: ["INBOX"], from: "Responder <responder@example.com>", subject: "Automatic reply: away", autoSubmitted: "auto-replied", body: "Away until Monday." }), searchMessages: async () => [] } as unknown as GmailPort,
+      calendar: { listEvents: async () => [] } as unknown as CalendarPort,
+    });
+    await service.reviewIncomingEmail("auto");
+    expect(reviewEmail).not.toHaveBeenCalled();
+    expect(delivered).toEqual([]);
+    expect(ledger.getMetadata("chief-of-staff:email-reviewed:auto")).toBeTruthy();
+    ledger.close();
+  });
+
+  it("recognises standard automatic-reply headers and subjects", () => {
+    expect(isAutomaticReply({ body: "", autoSubmitted: "auto-generated" })).toBe(true);
+    expect(isAutomaticReply({ body: "", subject: "Out of office" })).toBe(true);
+    expect(isAutomaticReply({ body: "", subject: "A normal question", from: "Person <person@example.com>" })).toBe(false);
+  });
+
+  it("recognises mailing lists and Gmail promotional mail before model review", () => {
+    expect(isBulkMail({ body: "", listUnsubscribe: "<mailto:leave@example.com>" })).toBe(true);
+    expect(isBulkMail({ body: "", precedence: "bulk" })).toBe(true);
+    expect(isBulkMail({ body: "", labelIds: ["INBOX", "CATEGORY_PROMOTIONS"] })).toBe(true);
+    expect(isBulkMail({ body: "", from: "Person <person@example.com>", labelIds: ["INBOX"] })).toBe(false);
+  });
+
+  it("does not review a newsletter that happens to contain sensitive keywords", async () => {
+    const { ledger, delivered } = await setup();
+    const reviewEmail = vi.fn();
+    const service = createChiefOfStaff({
+      ledger, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner"], deliver: async (_space, text) => { delivered.push(text); }, reviewEmail,
+      gmail: { readMessage: async () => ({ id: "newsletter", labelIds: ["INBOX"], from: "News <news@example.com>", subject: "Tax season tips", listId: "weekly.news.example.com", body: "Health and payroll updates." }), searchMessages: async () => [] } as unknown as GmailPort,
+      calendar: { listEvents: async () => [] } as unknown as CalendarPort,
+    });
+    await service.reviewIncomingEmail("newsletter");
+    expect(reviewEmail).not.toHaveBeenCalled();
+    expect(delivered).toEqual([]);
+    ledger.close();
+  });
+
   it("creates an approval proposal from inbound mail and pins the reply to the real sender", async () => {
     const { ledger, delivered, service } = await setup();
     await service.reviewIncomingEmail("m1");
@@ -51,9 +93,27 @@ describe("chief of staff service", () => {
     const gmail = { readMessage: async () => ({ id: "sensitive", threadId: "sensitive-thread", labelIds: ["INBOX"], from: "Clinic <clinic@example.com>", subject: "An update", body: "Private medical result", snippet: "Please review" }), searchMessages: async () => [] } as unknown as GmailPort;
     const service = createChiefOfStaff({ ledger, gmail, calendar: { listEvents: async () => [] } as unknown as CalendarPort, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner"], deliver: async (_space, text) => { delivered.push(text); }, reviewEmail: async () => ({ actionable: true, interrupt: true, summary: "Reply", rationale: "Sensitive decision.", confidence: 0.9, draftBody: "Private proposed response" }), now: () => new Date("2029-01-01T00:00:00.000Z") });
     await service.reviewIncomingEmail("sensitive");
-    expect(delivered[0]).toContain("Sensitive email needs your review");
+    expect(delivered[0]).toContain("Sensitive: Reply");
     expect(delivered[0]).not.toContain("Private proposed response");
     expect(ledger.parseCommand("owner", "show 1", new Date("2029-01-01T01:00:00.000Z"))?.proposal.detail).toBe("Private proposed response");
+    ledger.close();
+  });
+
+  it("surfaces a time-sensitive FYI without offering to draft a reply", async () => {
+    const { ledger, delivered } = await setup();
+    const service = createChiefOfStaff({
+      ledger, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner"], deliver: async (_space, text) => { delivered.push(text); },
+      gmail: { readMessage: async () => ({ id: "flight", threadId: "flight", labelIds: ["INBOX"], from: "Travel <travel@example.com>", subject: "Flight departs in four hours", body: "Your flight is on time." }), searchMessages: async () => [] } as unknown as GmailPort,
+      calendar: { listEvents: async () => [] } as unknown as CalendarPort,
+      reviewEmail: async () => ({ outcome: "fyi", interrupt: true, summary: "Jetstar JQ504 leaves in about four hours.", rationale: "Check in before leaving.", confidence: 0.95 }),
+      now: () => new Date("2029-01-01T00:00:00.000Z"),
+    });
+    await service.reviewIncomingEmail("flight");
+    expect(delivered[0]).toContain("Jetstar JQ504 leaves in about four hours.");
+    expect(delivered[0]).toContain("got it 1");
+    expect(delivered[0]).not.toContain("Gmail draft");
+    expect(delivered[0]).not.toContain("Check in before leaving.");
+    expect(ledger.parseCommand("owner", "got it 1")?.type).toBe("done");
     ledger.close();
   });
 

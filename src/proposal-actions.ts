@@ -203,6 +203,7 @@ export async function handleProposalCommand(input: {
       return `Deferred until ${command.until}.`;
     }
     if (command.proposal.kind === "email_draft") return executeEmailDraftProposal(input.ledger, input.gmail, command.proposal);
+    if (command.proposal.kind === "email_fyi" || command.proposal.kind === "email_decision") return "This item needs no action from me. You can reply “done” when you’ve handled it.";
     if (command.proposal.kind === "history_import") {
       if (!input.runHistoryImport) return "I couldn't start that import because historical learning is off.";
       return executeHistoryImportProposal(input.ledger, command.proposal, input.runHistoryImport);
@@ -210,7 +211,7 @@ export async function handleProposalCommand(input: {
     if (!input.calendar) return "I couldn't apply that calendar plan because Calendar isn't connected.";
     return executeCalendarMoveProposal(input.ledger, input.calendar, command.proposal);
   }
-  if (input.texts.some((text) => /^(approve|edit|reject|ignore|not important|why|show|not now|yes|done|always surface|preferences|forget preference)\b/i.test(text.trim()))) {
+  if (input.texts.some((text) => /^(approve|edit|reject|ignore|not important|why|show|not now|yes|done|got it|always surface|preferences|forget preference)\b/i.test(text.trim()))) {
     return "I can't match that to a current proposal. Reply with the number from the latest briefing.";
   }
   return undefined;

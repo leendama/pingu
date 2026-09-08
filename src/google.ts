@@ -207,6 +207,10 @@ export function googleGmailPort(credentials?: RuntimeSettings["google"]): GmailP
         bcc: headers.bcc,
         messageIdHeader: headers["message-id"],
         references: headers.references,
+        autoSubmitted: headers["auto-submitted"],
+        precedence: headers.precedence,
+        listId: headers["list-id"],
+        listUnsubscribe: headers["list-unsubscribe"],
         subject: headers.subject,
         date: headers.date,
         snippet: response.data.snippet,
@@ -221,7 +225,7 @@ export function googleGmailPort(credentials?: RuntimeSettings["google"]): GmailP
         const headers = Object.fromEntries((message.payload?.headers ?? []).map((header) => [header.name?.toLowerCase(), header.value]));
         return {
           id: message.id, threadId: message.threadId, from: headers.from, to: headers.to, cc: headers.cc,
-          bcc: headers.bcc, messageIdHeader: headers["message-id"], references: headers.references, subject: headers.subject, date: headers.date,
+          bcc: headers.bcc, messageIdHeader: headers["message-id"], references: headers.references, autoSubmitted: headers["auto-submitted"], precedence: headers.precedence, listId: headers["list-id"], listUnsubscribe: headers["list-unsubscribe"], subject: headers.subject, date: headers.date,
           snippet: message.snippet, labelIds: message.labelIds, ...boundedGmailBody(message.payload),
         };
       });

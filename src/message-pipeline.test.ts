@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Message, Space } from "spectrum-ts";
 import type { PendingEmail } from "./pending-emails.js";
-import { combineInboundMessages, createMessageProcessor, spaceKind } from "./message-pipeline.js";
+import { PluginRegistry, type AssistantPlugin } from "./plugins.js";
+import { gmailPlugin, type GmailPort } from "./capabilities/gmail.js";
+import { combineInboundMessages, createMessageProcessor, inboundSenderId, senderRuns, spaceKind } from "./message-pipeline.js";
 
 const pending: PendingEmail = {
   spaceId: "chat",
@@ -14,15 +16,16 @@ const pending: PendingEmail = {
   createdAt: new Date().toISOString(),
 };
 
-function inboundMessage(text = "draft an email"): Message {
+function inboundMessage(text = "draft an email", senderId: string | null = "owner-1"): Message {
   return {
     direction: "inbound",
     content: { type: "text", text },
+    sender: senderId ? { id: senderId, __platform: "imessage" } : undefined,
     reply: vi.fn(async () => undefined),
   } as unknown as Message;
 }
 
-function replyMessage(replyText: string, targetText: string): Message {
+function replyMessage(replyText: string, targetText: string, senderId = "owner-1"): Message {
   return {
     direction: "inbound",
     content: {
@@ -34,6 +37,7 @@ function replyMessage(replyText: string, targetText: string): Message {
         content: { type: "text", text: targetText },
       },
     },
+    sender: { id: senderId, __platform: "imessage" },
     reply: vi.fn(async () => undefined),
   } as unknown as Message;
 }
@@ -64,12 +68,14 @@ async function sentContentText(send: ReturnType<typeof vi.fn>, callIndex: number
 function dependencies() {
   return {
     assistantName: "Pingu",
+    ownerName: "Alex",
     timezone: "UTC",
     progressDelayMs: 60_000,
     synthesizeVoice: vi.fn(async () => Buffer.from("audio")),
     consumeEmailConfirmation: vi.fn(async () => ({})),
     getPendingEmail: vi.fn(async () => pending),
     markEmailReviewed: vi.fn(async () => undefined),
+    resolveRole: vi.fn(async (senderId: string | undefined) => senderId === "owner-1" ? "owner" as const : "guest" as const),
     generateReply: vi.fn(async (_spaceId, _text, context) => {
       context.draftForReview = "draft-1";
       return "model output is replaced by the canonical draft";
@@ -78,6 +84,45 @@ function dependencies() {
 }
 
 describe("message pipeline", () => {
+  it("delivers a built-in Gmail draft through the registry without legacy runtime dependencies", async () => {
+    const createDraft = vi.fn(async () => "draft-new");
+    const registry = new PluginRegistry([gmailPlugin({ createDraft } as unknown as GmailPort)]);
+    const send = vi.fn(async () => undefined);
+    const { getPendingEmail, markEmailReviewed, consumeEmailConfirmation, ...deps } = dependencies();
+    deps.generateReply = vi.fn(async (_spaceId, _text, context) => {
+      await registry.run("create_gmail_draft", JSON.stringify({ to: ["friend@example.com"], cc: [], bcc: [], subject: "Hello", body: "Complete review text" }), context);
+      return "Incomplete model summary";
+    });
+    await createMessageProcessor(deps)(directSpace(send), inboundMessage());
+    expect(createDraft).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledOnce();
+    const text = await sentContentText(send, 0);
+    expect(text).toContain("Complete review text");
+    expect(text).toContain("friend@example.com");
+    expect(text).toContain("send manually");
+    expect(text).not.toContain("Incomplete model summary");
+  });
+
+  it.each(["absent", "mismatch", "unavailable"])("preserves a legacy plugin's successful draft when its preview lookup is %s", async (mode) => {
+    const plugin: AssistantPlugin = {
+      id: "legacy-draft", name: "Legacy draft", tools: [{ type: "function", name: "legacy_draft", parameters: { type: "object", properties: {} }, strict: false }],
+      run: vi.fn(async () => ({ draftCreated: "legacy-1", output: '{"created":true}' })),
+    };
+    const registry = new PluginRegistry([plugin]);
+    const send = vi.fn(async () => undefined);
+    const { getPendingEmail, consumeEmailConfirmation, ...deps } = dependencies();
+    deps.generateReply = vi.fn(async (_spaceId, _text, context) => {
+      await registry.run("legacy_draft", "{}", context);
+      return "model reply";
+    });
+    await createMessageProcessor({ ...deps, ...(mode === "absent" ? {} : { getPendingEmail: async () => { if (mode === "unavailable") throw new Error("lookup failed"); return pending; } }) })(directSpace(send), inboundMessage());
+    expect(plugin.run).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledOnce();
+    expect(await sentContentText(send, 0)).toContain("a Gmail draft was created");
+    expect(await sentContentText(send, 0)).not.toContain("failed after");
+    expect(deps.markEmailReviewed).not.toHaveBeenCalled();
+  });
+
   it("arms email confirmation only after the canonical draft is delivered", async () => {
     const deps = dependencies();
     const send = vi.fn(async () => undefined);
@@ -201,5 +246,185 @@ describe("message pipeline", () => {
     deps.generateReply.mockImplementation(async () => "Sent");
     await createMessageProcessor(deps)(directSpace(), [inboundMessage("send it"), inboundMessage("also grab milk")]);
     expect(deps.consumeEmailConfirmation).toHaveBeenCalledWith("chat", ["send it", "also grab milk"]);
+  });
+});
+
+describe("sender identity", () => {
+  it("reads the sender id from the message and never from the space", () => {
+    expect(inboundSenderId(inboundMessage("hi", "abc"))).toBe("abc");
+    expect(inboundSenderId(inboundMessage("hi", null))).toBeUndefined();
+  });
+
+  it("passes the resolved role and sender id to the model turn", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    await createMessageProcessor(deps)(directSpace(), inboundMessage("hi", "stranger-9"));
+    const context = deps.generateReply.mock.calls[0]?.[2] as { role: string; senderId?: string };
+    expect(context).toMatchObject({ role: "guest", senderId: "stranger-9" });
+    expect(deps.consumeEmailConfirmation).not.toHaveBeenCalled();
+  });
+
+  it("fails closed to guest when the platform recorded no sender", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    await createMessageProcessor(deps)(directSpace(), inboundMessage("hi", null));
+    expect(deps.resolveRole).toHaveBeenCalledWith(undefined);
+    expect((deps.generateReply.mock.calls[0]?.[2] as { role: string }).role).toBe("guest");
+  });
+
+  it("redeems a claim code without involving the model", async () => {
+    const deps = dependencies();
+    const redeemClaim = vi.fn(async (text: string) => text.startsWith("PINGU") ? "verified" as const : undefined);
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, redeemClaim })(directSpace(send), inboundMessage("PINGU-4F7K2Q", "new-owner"));
+    expect(redeemClaim).toHaveBeenCalledWith("PINGU-4F7K2Q", { senderId: "new-owner", spaceId: "chat" });
+    expect(deps.generateReply).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("Verified");
+  });
+
+  it("does not redeem claim codes from a group chat", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const redeemClaim = vi.fn(async () => "verified" as const);
+    const space = { ...directSpace(), type: "group" } as unknown as Space;
+    await createMessageProcessor({ ...deps, redeemClaim })(space, inboundMessage("PINGU-4F7K2Q", "someone"));
+    expect(redeemClaim).not.toHaveBeenCalled();
+  });
+});
+
+describe("mixed-sender batches", () => {
+  it("splits a batch into runs of one sender and never merges anonymous messages", () => {
+    const runs = senderRuns([inboundMessage("a", "g"), inboundMessage("b", "g"), inboundMessage("c", "owner-1"), inboundMessage("d", null), inboundMessage("e", null)]);
+    expect(runs.map((run) => run.length)).toEqual([2, 1, 1, 1]);
+  });
+
+  it("gives a guest's message in a group its own turn instead of the owner's role", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const space = { ...directSpace(), type: "group" } as unknown as Space;
+    await createMessageProcessor(deps)(space, [inboundMessage("remove sam from the group", "guest-1"), inboundMessage("what's the time?", "owner-1")]);
+    expect(deps.generateReply).toHaveBeenCalledTimes(2);
+    const roles = deps.generateReply.mock.calls.map((call) => (call[2] as { role: string; senderId?: string }));
+    expect(roles).toEqual([expect.objectContaining({ role: "guest", senderId: "guest-1" }), expect.objectContaining({ role: "owner", senderId: "owner-1" })]);
+    expect(deps.generateReply.mock.calls[0]?.[1]).not.toContain("what's the time");
+  });
+});
+
+describe("guest handling", () => {
+  it("shows the disclosure once on first contact, then answers", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "Sure");
+    const admitGuest = vi.fn(async () => ({ allowed: true as const, firstContact: true, remaining: 19 }));
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, admitGuest, guestDisclosure: "Hi, I'm Pingu, Alex's assistant." })(directSpace(send), inboundMessage("is alex free friday?", "guest-1"));
+    expect(admitGuest).toHaveBeenCalledWith("guest-1", 1);
+    expect(await sentContentText(send, 0)).toContain("Alex's assistant");
+    expect(await sentContentText(send, 1)).toContain("Sure");
+  });
+
+  it("stops answering a guest past the daily cap and says so", async () => {
+    const deps = dependencies();
+    const admitGuest = vi.fn(async () => ({ allowed: false as const, firstContact: false, reason: "sender-cap" as const }));
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, admitGuest })(directSpace(send), inboundMessage("again", "guest-1"));
+    expect(deps.generateReply).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("message limit");
+  });
+
+  it("counts every message of a burst, releases the reservation afterwards, and refuses oversized text", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const admitGuest = vi.fn(async () => ({ allowed: true as const, firstContact: false, remaining: 1 }));
+    const releaseGuest = vi.fn(async () => undefined);
+    await createMessageProcessor({ ...deps, admitGuest, releaseGuest })(directSpace(), [inboundMessage("one", "g"), inboundMessage("two", "g")]);
+    expect(admitGuest).toHaveBeenCalledWith("g", 2);
+    expect(releaseGuest).toHaveBeenCalledOnce();
+
+    deps.generateReply.mockRejectedValue(new Error("boom"));
+    await createMessageProcessor({ ...deps, admitGuest, releaseGuest })(directSpace(), inboundMessage("again", "g"));
+    expect(releaseGuest).toHaveBeenCalledTimes(2);
+
+    const send = vi.fn(async (_content: unknown) => undefined);
+    deps.generateReply.mockImplementation(async () => "ok");
+    await createMessageProcessor({ ...deps, admitGuest, releaseGuest, guestMaxInboundChars: 10 })(directSpace(send), inboundMessage("this is far too long", "g"));
+    expect(await sentContentText(send, 0)).toContain("too long");
+    expect(deps.generateReply).toHaveBeenCalledTimes(2);
+    expect(releaseGuest).toHaveBeenCalledTimes(3);
+  });
+
+  it("tells a guest plainly when a turn would cost more than allowed", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockRejectedValue(Object.assign(new Error("budget"), { name: "TurnBudgetExceededError" }));
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor(deps)(directSpace(send), inboundMessage("long question", "guest-1"));
+    expect(await sentContentText(send, 0)).toContain("more than one guest turn is allowed to cost");
+  });
+
+  it("never counts the owner against guest limits", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const admitGuest = vi.fn(async () => ({ allowed: true as const, firstContact: false, remaining: 1 }));
+    await createMessageProcessor({ ...deps, admitGuest })(directSpace(), inboundMessage("hi", "owner-1"));
+    expect(admitGuest).not.toHaveBeenCalled();
+  });
+});
+
+describe("owner replies to scheduling requests", () => {
+  it("lets the owner's yes resolve a request without the model", async () => {
+    const deps = dependencies();
+    const resolveOwnerReply = vi.fn(async () => "Booked and invitation sent.");
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, resolveOwnerReply })(directSpace(send), replyMessage("yes", "📅 Request PK-4F7K from Sam"));
+    expect(resolveOwnerReply).toHaveBeenCalledWith(expect.objectContaining({ texts: ["yes"], spaceId: "chat", senderId: "owner-1" }));
+    expect(deps.generateReply).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("Booked");
+  });
+
+  it("does not let an unmatched proposal command swallow a booking confirmation", async () => {
+    const deps = dependencies();
+    const resolveOwnerReply = vi.fn(async () => "Booked and invitation sent.");
+    const resolveProposalCommand = vi.fn(async () => "I can't match that to a current proposal.");
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, resolveOwnerReply, resolveProposalCommand })(directSpace(send), replyMessage("yes", "📅 Request PK-4F7K from Sam"));
+    expect(resolveOwnerReply).toHaveBeenCalledOnce();
+    expect(resolveProposalCommand).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("Booked");
+  });
+
+  it("does not let an unmatched proposal command swallow an armed action confirmation", async () => {
+    const deps = dependencies();
+    const consumeActionConfirmation = vi.fn(async () => ({ confirmedActionKey: "delete_event:event-1" }));
+    const resolveProposalCommand = vi.fn(async () => "I can't match that to a current proposal.");
+    deps.generateReply.mockImplementation(async (_space, _text, context) => context.confirmedActionKey ?? "missing confirmation");
+    const send = vi.fn(async (_content: unknown) => undefined);
+    await createMessageProcessor({ ...deps, consumeActionConfirmation, resolveProposalCommand })(directSpace(send), inboundMessage("yes"));
+    expect(resolveProposalCommand).not.toHaveBeenCalled();
+    expect(await sentContentText(send, 0)).toContain("delete_event:event-1");
+  });
+
+  it("records the owner's chat so notices can reach them", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const recordOwnerSpace = vi.fn(async () => undefined);
+    await createMessageProcessor({ ...deps, recordOwnerSpace })(directSpace(), inboundMessage("hi"));
+    expect(recordOwnerSpace).toHaveBeenCalledWith("owner-1", "chat");
+    await createMessageProcessor({ ...deps, recordOwnerSpace })(directSpace(), inboundMessage("hi", "guest-1"));
+    expect(recordOwnerSpace).toHaveBeenCalledOnce();
+  });
+
+  it("falls through to the model when the reply is not a scheduling decision", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const resolveOwnerReply = vi.fn(async () => undefined);
+    await createMessageProcessor({ ...deps, resolveOwnerReply })(directSpace(), inboundMessage("what's on today?"));
+    expect(deps.generateReply).toHaveBeenCalledOnce();
+  });
+
+  it("never offers scheduling resolution to guests", async () => {
+    const deps = dependencies();
+    deps.generateReply.mockImplementation(async () => "ok");
+    const resolveOwnerReply = vi.fn(async () => "should not happen");
+    await createMessageProcessor({ ...deps, resolveOwnerReply })(directSpace(), inboundMessage("yes", "guest-1"));
+    expect(resolveOwnerReply).not.toHaveBeenCalled();
   });
 });

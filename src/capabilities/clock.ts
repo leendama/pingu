@@ -1,5 +1,6 @@
 import type { PinguPlugin } from "../plugins.js";
 import { capabilityPlugin, stringValue } from "../tools.js";
+import { liveTime } from "../time-context.js";
 
 export function clockPlugin(): PinguPlugin {
   return capabilityPlugin(
@@ -15,8 +16,8 @@ export function clockPlugin(): PinguPlugin {
             type: "object",
             properties: {
               timezone: {
-                type: "string",
-                description: "IANA timezone name. Use the user's configured timezone unless they ask for another location.",
+                type: ["string", "null"],
+                description: "Null uses the user's configured timezone. Supply an IANA timezone only when they ask for another location.",
               },
             },
             required: ["timezone"],
@@ -27,20 +28,8 @@ export function clockPlugin(): PinguPlugin {
         sideEffecting: false,
         run: async (args, context) => {
           const timezone = stringValue(args.timezone) ?? context.config.timezone;
-          const now = new Date();
-          const formatter = new Intl.DateTimeFormat("en-AU", {
-            timeZone: timezone,
-            dateStyle: "full",
-            timeStyle: "long",
-            hour12: true,
-          });
           return {
-            output: JSON.stringify({
-              timezone,
-              local_time: formatter.format(now),
-              iso_utc: now.toISOString(),
-              unix_time_ms: now.getTime(),
-            }),
+            output: JSON.stringify(liveTime(timezone)),
           };
         },
       },

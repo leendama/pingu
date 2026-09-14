@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { builtInPlugins } from "./builtin-plugin.js";
 import { PluginRegistry, type ToolRunContext } from "./plugins.js";
 
-function context(isGroup: boolean): ToolRunContext {
-  return { isGroup, config: { timezone: "UTC" }, sideEffectAttempted: false } as ToolRunContext;
+function context(isGroup: boolean, role: "owner" | "guest" = "owner"): ToolRunContext {
+  return { isGroup, role, spaceId: "chat", config: { timezone: "UTC" }, sideEffectAttempted: false, untrustedContentSeen: false } as ToolRunContext;
 }
 
 describe("built-in plugin policy", () => {
@@ -13,6 +13,14 @@ describe("built-in plugin policy", () => {
   it("registers every built-in tool through the safe registry", () => {
     expect(registry.tools).toHaveLength(plugins.flatMap((plugin) => plugin.tools).length);
     expect(registry.tools.length).toBeGreaterThan(20);
+  });
+
+  it("keeps built-in instruction tool references aligned with the registered tools", () => {
+    const names = new Set(registry.tools.map((tool) => tool.type === "function" ? tool.name : ""));
+    const identifiers = plugins.flatMap((plugin) => plugin.instructions ?? []).join("\n").match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? [];
+    expect(identifiers.filter((name) => !names.has(name))).toEqual([]);
+    expect(names.has("send_gmail_draft")).toBe(false);
+    expect(names.has("review_gmail_draft")).toBe(false);
   });
 
   it("blocks private built-ins in group chats", async () => {
@@ -30,5 +38,39 @@ describe("built-in plugin policy", () => {
     const turn = context(false);
     await registry.run("get_current_time", JSON.stringify({ timezone: "UTC" }), turn);
     expect(turn.sideEffectAttempted).toBe(false);
+  });
+
+  it("offers guests only chat, reminders, message features, and nothing private", () => {
+    const names = registry.toolsFor(context(false, "guest")).map((tool) => tool.type === "function" ? tool.name : "");
+    expect(names).toContain("create_reminder");
+    expect(names).toContain("react_to_message");
+    expect(names).toContain("forget_this_conversation");
+    expect(names).not.toContain("search_gmail");
+    expect(names).not.toContain("search_calendar");
+    expect(names).not.toContain("list_granola_notes");
+    expect(names).not.toContain("get_group_members");
+  });
+
+  it("drops the voice tool when the provider cannot synthesise speech", () => {
+    const silent = new PluginRegistry(builtInPlugins(undefined, { voice: false }));
+    expect(silent.tools.some((tool) => tool.type === "function" && tool.name === "send_voice_reply")).toBe(false);
+    expect(registry.tools.some((tool) => tool.type === "function" && tool.name === "send_voice_reply")).toBe(true);
+  });
+
+  it("marks Gmail and Granola reads as third-party content", async () => {
+    const turn = context(false);
+    await registry.run("read_gmail_message", JSON.stringify({ message_id: "m1" }), turn);
+    expect(turn.untrustedContentSeen).toBe(true);
+  });
+
+  it("lets only the owner rename a group or change its members", () => {
+    const guestInGroup = registry.toolsFor(context(true, "guest")).map((tool) => tool.type === "function" ? tool.name : "");
+    expect(guestInGroup).not.toContain("rename_group");
+    expect(guestInGroup).not.toContain("add_group_members");
+    expect(guestInGroup).not.toContain("remove_group_members");
+    expect(guestInGroup).toContain("send_poll");
+    const ownerInGroup = registry.toolsFor(context(true, "owner")).map((tool) => tool.type === "function" ? tool.name : "");
+    expect(ownerInGroup).toContain("rename_group");
+    expect(ownerInGroup).not.toContain("search_gmail");
   });
 });

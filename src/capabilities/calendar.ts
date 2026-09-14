@@ -1,5 +1,72 @@
+import { armPendingAction } from "../pending-confirmations.js";
 import type { PinguPlugin } from "../plugins.js";
 import { capabilityPlugin, cleanHeader, stringArray, stringValue, type JsonObject } from "../tools.js";
+
+/** Attendees other than the owner; deleting such an event emails them a cancellation. */
+export function otherAttendeeCount(event: CalendarEventData): number {
+  if (!Array.isArray(event.attendees)) return 0;
+  return event.attendees.filter((attendee) => attendee && typeof attendee === "object" && (attendee as { self?: boolean }).self !== true).length;
+}
+
+/**
+ * Why a delete needs the owner's yes, or undefined when one personal event can
+ * go in one step. (A turn that read third-party content cannot delete at all;
+ * the registry blocks every side-effecting tool there.)
+ */
+export function deleteConfirmationReason(event: CalendarEventData): string | undefined {
+  const reasons: string[] = [];
+  if (event.recurringEventId) reasons.push("it is part of a recurring series");
+  const attendees = otherAttendeeCount(event);
+  if (attendees > 0) reasons.push(`${attendees} attendee${attendees === 1 ? "" : "s"} would receive a cancellation email`);
+  return reasons.length ? reasons.join(" and ") : undefined;
+}
+
+interface ExpectedEventFields {
+  summary?: string;
+  start?: CalendarTime;
+  end?: CalendarTime;
+  description?: string;
+  location?: string;
+  attendees?: string[];
+  colorId?: string;
+  recurrence?: string[];
+}
+
+/** Every requested field the read-back event fails to match. A write is verified only when this is empty. */
+export function eventMismatches(event: CalendarEventData, expected: ExpectedEventFields, zones: CalendarZones): string[] {
+  const mismatches: string[] = [];
+  if (expected.summary !== undefined && (event.summary ?? "") !== expected.summary) mismatches.push("title");
+  if (expected.start && !sameCalendarTime(event.start, expected.start, zones)) mismatches.push("start time");
+  if (expected.end && !sameCalendarTime(event.end, expected.end, zones)) mismatches.push("end time");
+  if (expected.description !== undefined && (event.description ?? "") !== expected.description) mismatches.push("description");
+  if (expected.location !== undefined && (event.location ?? "") !== expected.location) mismatches.push("location");
+  if (expected.colorId !== undefined && (event.colorId ?? "") !== expected.colorId) mismatches.push("colour");
+  if (expected.recurrence !== undefined) {
+    const actual = Array.isArray(event.recurrence) ? event.recurrence.map((rule) => rule.trim().toUpperCase()).sort() : [];
+    const wanted = expected.recurrence.map((rule) => rule.trim().toUpperCase()).sort();
+    if (JSON.stringify(actual) !== JSON.stringify(wanted)) mismatches.push("recurrence");
+  }
+  if (expected.attendees) {
+    const actual = new Set((Array.isArray(event.attendees) ? event.attendees as Array<{ email?: string | null; self?: boolean }> : [])
+      .filter((attendee) => attendee && !attendee.self && attendee.email)
+      .map((attendee) => attendee.email!.toLowerCase()));
+    const wanted = new Set(expected.attendees.map((email) => email.toLowerCase()));
+    const missing = [...wanted].filter((email) => !actual.has(email));
+    const unexpected = [...actual].filter((email) => !wanted.has(email));
+    const parts = [
+      ...(missing.length ? [`missing ${missing.join(", ")}`] : []),
+      ...(unexpected.length ? [`unexpected ${unexpected.join(", ")}`] : []),
+    ];
+    if (parts.length) mismatches.push(`attendees (${parts.join("; ")})`);
+  }
+  return mismatches;
+}
+
+/** Google reports a deleted event as missing or as status "cancelled". */
+export async function verifyDeleted(port: CalendarPort, eventId: string): Promise<boolean> {
+  const remaining = await port.getEvent(eventId);
+  return !remaining || remaining.status === "cancelled";
+}
 
 export interface CalendarEventData {
   id?: string | null;
@@ -13,6 +80,13 @@ export interface CalendarEventData {
   status?: string | null;
   transparency?: string | null;
   colorId?: string | null;
+  organizer?: { self?: boolean | null; email?: string | null } | null;
+  recurringEventId?: string | null;
+  recurrence?: string[] | null;
+  hangoutLink?: string | null;
+  extendedProperties?: { private?: Record<string, string> | null; shared?: Record<string, string> | null } | null;
+  etag?: string | null;
+  updated?: string | null;
 }
 
 export interface CalendarPort {
@@ -20,8 +94,8 @@ export interface CalendarPort {
   getTimezone(): Promise<string | undefined>;
   listEvents(params: { timeMin?: string; timeMax?: string; query?: string }): Promise<CalendarEventData[]>;
   getEvent(eventId: string): Promise<CalendarEventData | undefined>;
-  insertEvent(requestBody: JsonObject, sendUpdates: "all" | "none"): Promise<CalendarEventData>;
-  patchEvent(eventId: string, requestBody: JsonObject, sendUpdates: "all" | "none"): Promise<CalendarEventData>;
+  insertEvent(requestBody: JsonObject, sendUpdates: "all" | "none", options?: { conferenceDataVersion?: 0 | 1 }): Promise<CalendarEventData>;
+  patchEvent(eventId: string, requestBody: JsonObject, sendUpdates: "all" | "none", options?: { expectedEtag?: string }): Promise<CalendarEventData>;
   deleteEvent(eventId: string, sendUpdates: "all" | "none"): Promise<void>;
 }
 
@@ -30,12 +104,34 @@ export interface CalendarPort {
  * send to Google); bare all-day dates resolve in the calendar's timezone,
  * because that is the zone Google gives their boundaries.
  */
-interface CalendarZones {
+export interface CalendarZones {
   timezone: string;
   allDayTimezone: string;
 }
 
-async function calendarZones(port: CalendarPort, timezone: string): Promise<CalendarZones> {
+/** Convert a safe RFC 5545 recurrence rule into Google's event representation. */
+export function calendarRecurrence(value: string | undefined): string[] | undefined {
+  if (!value?.trim()) return undefined;
+  const clauses = value.trim().toUpperCase().split(";");
+  const seen = new Set<string>();
+  for (const clause of clauses) {
+    const [key, ruleValue, ...extra] = clause.split("=");
+    if (!key || !ruleValue || extra.length || seen.has(key)) throw new Error("Recurrence must be a valid RFC 5545 rule, such as FREQ=WEEKLY;BYDAY=SU.");
+    seen.add(key);
+    const valid = (key === "FREQ" && /^(DAILY|WEEKLY|MONTHLY|YEARLY)$/.test(ruleValue))
+      || (key === "INTERVAL" && /^[1-9]\d*$/.test(ruleValue))
+      || (key === "COUNT" && /^[1-9]\d*$/.test(ruleValue))
+      || (key === "UNTIL" && /^\d{8}(T\d{6}Z)?$/.test(ruleValue))
+      || (key === "BYDAY" && /^(MO|TU|WE|TH|FR|SA|SU)(,(MO|TU|WE|TH|FR|SA|SU))*$/.test(ruleValue))
+      || (key === "WKST" && /^(MO|TU|WE|TH|FR|SA|SU)$/.test(ruleValue));
+    if (!valid) throw new Error("Recurrence must be a valid RFC 5545 rule, such as FREQ=WEEKLY;BYDAY=SU.");
+  }
+  if (!seen.has("FREQ")) throw new Error("Recurrence must include FREQ, such as FREQ=WEEKLY;BYDAY=SU.");
+  if (seen.has("COUNT") && seen.has("UNTIL")) throw new Error("A recurrence can end with COUNT or UNTIL, not both.");
+  return [`RRULE:${clauses.join(";")}`];
+}
+
+export async function calendarZones(port: CalendarPort, timezone: string): Promise<CalendarZones> {
   return { timezone, allDayTimezone: await port.getTimezone() ?? timezone };
 }
 
@@ -45,12 +141,15 @@ interface CalendarTime {
   timeZone?: string | null;
 }
 
-interface RescheduleMove {
+export interface RescheduleMove {
   eventId: string;
   newStart: string;
   newEnd: string;
   /** Explicit group name, or null to opt out of title-based sequence inference. Undefined infers from the title. */
   sequenceGroup?: string | null;
+  /** Optimistic concurrency snapshot used by durable approval proposals. */
+  expectedEtag?: string;
+  expectedUpdated?: string;
 }
 
 interface PreparedMove extends RescheduleMove {
@@ -144,7 +243,7 @@ function eventTime(value: unknown): CalendarTime | undefined {
   return value as CalendarTime;
 }
 
-function eventBounds(event: CalendarEventData, zones: CalendarZones) {
+export function eventBounds(event: CalendarEventData, zones: CalendarZones) {
   const start = eventTime(event.start);
   const end = eventTime(event.end);
   const startText = start?.dateTime ?? start?.date;
@@ -156,7 +255,7 @@ function eventBounds(event: CalendarEventData, zones: CalendarZones) {
   };
 }
 
-function overlaps(a: { startMs: number; endMs: number }, b: { startMs: number; endMs: number }) {
+export function overlaps(a: { startMs: number; endMs: number }, b: { startMs: number; endMs: number }) {
   return a.startMs < b.endMs && b.startMs < a.endMs;
 }
 
@@ -196,6 +295,8 @@ async function prepareMoves(port: CalendarPort, moves: RescheduleMove[], zones: 
   return Promise.all(moves.map(async (move) => {
     const original = await port.getEvent(move.eventId);
     if (!original) throw new Error(`Calendar event ${move.eventId} was not found.`);
+    if (move.expectedEtag && original.etag !== move.expectedEtag) throw new Error(`Calendar event ${move.eventId} changed after the proposal.`);
+    if (move.expectedUpdated && original.updated !== move.expectedUpdated) throw new Error(`Calendar event ${move.eventId} changed after the proposal.`);
     const originalBounds = eventBounds(original, zones);
     if (!originalBounds) throw new Error(`Calendar event ${move.eventId} has no usable start or end.`);
     const target = eventWindow(move.newStart, move.newEnd, zones);
@@ -207,7 +308,7 @@ async function prepareMoves(port: CalendarPort, moves: RescheduleMove[], zones: 
 }
 
 /** Find the first busy event overlapping any of the given windows, or undefined when every window is free. */
-async function busyConflict<TWindow extends { startMs: number; endMs: number }>(
+export async function busyConflict<TWindow extends { startMs: number; endMs: number }>(
   port: CalendarPort,
   windows: TWindow[],
   ignoredIds: Set<string>,
@@ -223,6 +324,10 @@ async function busyConflict<TWindow extends { startMs: number; endMs: number }>(
     if (window) return { window, event };
   }
   return undefined;
+}
+
+function conflictDescription(event: CalendarEventData, window: { startMs: number; endMs: number }, zones: CalendarZones): string {
+  return `Requested window ${new Date(window.startMs).toISOString()} to ${new Date(window.endMs).toISOString()} (timezone ${zones.timezone}) conflicts with existing event ${event.id}${event.summary ? ` (${event.summary})` : ""}; event start ${JSON.stringify(event.start)}, end ${JSON.stringify(event.end)}. Check the full dates and timezone against the user's request before suggesting another time.`;
 }
 
 async function validateMovePlan(
@@ -243,7 +348,7 @@ async function validateMovePlan(
 
   const ignoredIds = new Set([...prepared.map((move) => move.eventId), ...duplicateIds]);
   const conflict = await busyConflict(port, prepared, ignoredIds, zones);
-  if (conflict) throw new Error(`Move for ${conflict.window.eventId} conflicts with existing event ${conflict.event.id}. Choose a free time.`);
+  if (conflict) throw new Error(conflictDescription(conflict.event, conflict.window, zones));
 
   const groups = new Map<string, PreparedMove[]>();
   for (const move of prepared) {
@@ -280,7 +385,7 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
   const applied: PreparedMove[] = [];
   try {
     for (const move of prepared) {
-      await port.patchEvent(move.eventId, { start: move.startValue, end: move.endValue }, "all");
+      await port.patchEvent(move.eventId, { start: move.startValue, end: move.endValue }, "all", { expectedEtag: move.original.etag ?? undefined });
       applied.push(move);
     }
     for (const move of prepared) {
@@ -294,13 +399,19 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
     for (const move of applied.reverse()) {
       try {
         await port.patchEvent(move.eventId, { start: move.original.start, end: move.original.end }, "all");
+        const restored = await port.getEvent(move.eventId);
+        if (!restored || !sameCalendarTime(restored.start, move.original.start!, zones) || !sameCalendarTime(restored.end, move.original.end!, zones)) {
+          rollbackFailures.push(move.eventId);
+        }
       } catch {
         rollbackFailures.push(move.eventId);
       }
     }
     const detail = error instanceof Error ? error.message : String(error);
     const rollback = rollbackFailures.length ? ` Rollback also failed for: ${rollbackFailures.join(", ")}.` : " All applied moves were rolled back.";
-    throw new Error(`${detail}${rollback}`);
+    const wrapped = new Error(`${detail}${rollback}`);
+    if (typeof error === "object" && error && "code" in error) (wrapped as Error & { code?: number }).code = Number(error.code);
+    throw wrapped;
   }
 
   const deleted: string[] = [];
@@ -318,9 +429,53 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
   return { moved: prepared.length, deletedDuplicates: deleted.length };
 }
 
+/** Search results without text other people may have written; descriptions come only from read_calendar_event. */
+export function searchSummary(event: CalendarEventData): Omit<CalendarEventData, "description"> {
+  const { description: _description, ...rest } = event;
+  return rest;
+}
+
+/** Shared verified move path for both model tools and approval-ledger execution. */
+export async function applyVerifiedCalendarMovePlan(
+  port: CalendarPort,
+  moves: RescheduleMove[],
+  duplicateIds: string[],
+  timezone: string,
+  options: { bufferMinutes?: number } = {},
+): Promise<{ moved: number; deletedDuplicates: number }> {
+  if (new Set(duplicateIds).size !== duplicateIds.length) throw new Error("Each duplicate event ID can appear only once.");
+  const movedIds = new Set(moves.map((move) => move.eventId));
+  if (duplicateIds.some((eventId) => movedIds.has(eventId))) throw new Error("An event cannot be both moved and deleted as a duplicate.");
+  const zones = await calendarZones(port, timezone);
+  const prepared = await prepareMoves(port, moves, zones);
+  for (const eventId of duplicateIds) {
+    if (!await port.getEvent(eventId)) throw new Error(`Duplicate calendar event ${eventId} was not found. Nothing was changed.`);
+  }
+  await validateMovePlan(port, prepared, new Set(duplicateIds), zones);
+  const bufferMs = Math.max(0, options.bufferMinutes ?? 0) * 60_000;
+  if (bufferMs > 0) {
+    for (let left = 0; left < prepared.length; left += 1) {
+      for (let right = left + 1; right < prepared.length; right += 1) {
+        const a = prepared[left]!;
+        const b = prepared[right]!;
+        if (a.startMs < b.endMs + bufferMs && b.startMs < a.endMs + bufferMs) throw new Error(`Planned moves for ${a.eventId} and ${b.eventId} do not leave the required buffer.`);
+      }
+    }
+    const expanded = prepared.map((move) => ({ ...move, startMs: move.startMs - bufferMs, endMs: move.endMs + bufferMs }));
+    const conflict = await busyConflict(port, expanded, new Set([...moves.map((move) => move.eventId), ...duplicateIds]), zones);
+    if (conflict) throw new Error(`Move for ${conflict.window.eventId} does not leave the required buffer around ${conflict.event.id}.`);
+  }
+  return applyMovePlan(port, prepared, duplicateIds, zones);
+}
+
 export function calendarPlugin(port: CalendarPort): PinguPlugin {
   return capabilityPlugin(
-    { id: "calendar", name: "Google Calendar", description: "Search, create, move, recolour, edit, and delete events." },
+    {
+      id: "calendar",
+      name: "Google Calendar",
+      description: "Search, create, move, recolour, edit, and delete events.",
+      instructions: ["search_calendar omits event descriptions. Call read_calendar_event when the description or invitation text matters."],
+    },
     [
       {
         schema: {
@@ -374,14 +529,37 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
             timeMax: stringValue(args.time_max),
             query: stringValue(args.query),
           });
-          return { output: JSON.stringify({ events }) };
+          return { output: JSON.stringify({ events: events.map(searchSummary) }) };
+        },
+      },
+      {
+        schema: {
+          type: "function",
+          name: "read_calendar_event",
+          description: "Read one event in full, including its description, which may have been written by whoever sent the invitation. Use an ID from search_calendar.",
+          strict: true,
+          parameters: {
+            type: "object",
+            properties: { event_id: { type: "string", description: "Exact Google Calendar event ID returned by search_calendar." } },
+            required: ["event_id"],
+            additionalProperties: false,
+          },
+        },
+        sideEffecting: false,
+        untrustedSource: true,
+        run: async (args) => {
+          const eventId = stringValue(args.event_id);
+          if (!eventId) throw new Error("Event ID is required.");
+          const event = await port.getEvent(eventId);
+          if (!event) throw new Error(`Calendar event ${eventId} was not found.`);
+          return { output: JSON.stringify({ event }) };
         },
       },
       {
         schema: {
           type: "function",
           name: "delete_calendar_event",
-          description: "Delete an existing event from the user's primary Google Calendar immediately when the request identifies exactly one event. Search first when needed and ask one focused question if the match is ambiguous.",
+          description: "Delete one event from the user's primary Google Calendar. A single personal event is deleted immediately. A recurring event or one with other attendees returns confirmation_required; describe what would happen and call again after the owner says yes in their next message.",
           strict: true,
           parameters: {
             type: "object",
@@ -392,11 +570,27 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
             additionalProperties: false,
           },
         },
-        run: async (args) => {
+        run: async (args, context) => {
           const eventId = stringValue(args.event_id);
           if (!eventId) throw new Error("Event ID is required.");
+          const event = await port.getEvent(eventId);
+          if (!event) throw new Error(`Calendar event ${eventId} was not found. Nothing was changed.`);
+          const key = `delete_event:${eventId}`;
+          const reason = deleteConfirmationReason(event);
+          if (reason && context.confirmedActionKey !== key) {
+            await armPendingAction(context.spaceId, key, `Delete "${event.summary ?? eventId}"`);
+            return {
+              output: JSON.stringify({
+                confirmation_required: true,
+                reason,
+                event: { id: event.id, summary: event.summary, start: event.start, end: event.end, attendees: otherAttendeeCount(event), recurring: Boolean(event.recurringEventId) },
+                instruction: "Tell the owner exactly what would be deleted and who would be emailed, then wait for their yes in the next message before calling this tool again.",
+              }),
+            };
+          }
           await port.deleteEvent(eventId, "all");
-          return { output: JSON.stringify({ deleted: true, event_id: eventId }) };
+          if (!await verifyDeleted(port, eventId)) throw new Error(`Google accepted the delete but event ${eventId} is still on the calendar. Nothing else was changed.`);
+          return { output: JSON.stringify({ deleted: true, verified: true, event_id: eventId, summary: event.summary }) };
         },
       },
       {
@@ -502,6 +696,21 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           for (const eventId of duplicateIds) {
             if (!await port.getEvent(eventId)) throw new Error(`Duplicate calendar event ${eventId} was not found. Nothing was changed.`);
           }
+          if (duplicateIds.length > 0) {
+            const key = `bulk_delete:${[...duplicateIds].sort().join(",")}`;
+            if (context.confirmedActionKey !== key) {
+              await armPendingAction(context.spaceId, key, `Delete ${duplicateIds.length} duplicate event(s) after moving ${moves.length}`);
+              return {
+                output: JSON.stringify({
+                  confirmation_required: true,
+                  reason: `${duplicateIds.length} event(s) would be deleted after the moves`,
+                  moves: moves.length,
+                  duplicate_event_ids: duplicateIds,
+                  instruction: "Describe the moves and the deletions, then wait for the owner's yes in the next message before calling this tool again with the same plan.",
+                }),
+              };
+            }
+          }
           await validateMovePlan(port, prepared, new Set(duplicateIds), zones);
           const result = await applyMovePlan(port, prepared, duplicateIds, zones);
           return { output: JSON.stringify({ completed: true, moved_count: result.moved, deleted_duplicate_count: result.deletedDuplicates }) };
@@ -511,7 +720,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
         schema: {
           type: "function",
           name: "create_calendar_event",
-          description: "Create an event on the user's primary Google Calendar immediately when the request provides an unambiguous title, start, and end or duration.",
+          description: "Create an event on the user's primary Google Calendar when title, date, start and duration are clear. Explicit past dates are supported: do not roll them forward. Use the live runtime date for today/this morning. If correcting a previous booking, read it first and move it instead of creating a duplicate.",
           strict: true,
           parameters: {
             type: "object",
@@ -523,8 +732,9 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
               description: { type: ["string", "null"] },
               location: { type: ["string", "null"] },
               attendees: { type: "array", items: { type: "string", description: "Attendee email address." } },
+              recurrence: { type: ["string", "null"], description: "Optional RFC 5545 recurrence rule without the RRULE prefix, for example FREQ=WEEKLY;BYDAY=SU. Null creates a one-off event." },
             },
-            required: ["title", "start", "end", "timezone", "description", "location", "attendees"],
+            required: ["title", "start", "end", "timezone", "description", "location", "attendees", "recurrence"],
             additionalProperties: false,
           },
         },
@@ -540,10 +750,11 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           // Timed events must land on free time; all-day events coexist with the day's schedule.
           if (!startValue.date) {
             const conflict = await busyConflict(port, [{ startMs, endMs }], new Set(), zones);
-            if (conflict) throw new Error(`That time conflicts with existing event ${conflict.event.id}${conflict.event.summary ? ` (${conflict.event.summary})` : ""}. Choose a free time.`);
+            if (conflict) throw new Error(conflictDescription(conflict.event, { startMs, endMs }, zones));
           }
           const attendees = stringArray(args.attendees).map((email) => ({ email: cleanHeader(email) }));
-          const event = await port.insertEvent(
+          const recurrence = calendarRecurrence(stringValue(args.recurrence));
+          const created = await port.insertEvent(
             {
               summary: title,
               start: startValue,
@@ -551,12 +762,23 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
               description: stringValue(args.description),
               location: stringValue(args.location),
               attendees,
+              ...(recurrence ? { recurrence } : {}),
             },
             attendees.length ? "all" : "none",
           );
+          const event = created.id ? await port.getEvent(created.id) : undefined;
+          if (!event) throw new Error("Google accepted the event but it could not be read back. Check the calendar before trying again.");
+          const mismatches = eventMismatches(event, {
+            summary: title, start: startValue, end: endValue,
+            description: stringValue(args.description), location: stringValue(args.location),
+            attendees: attendees.map((attendee) => attendee.email),
+            ...(recurrence ? { recurrence } : {}),
+          }, zones);
+          if (mismatches.length) throw new Error(`Google created event ${event.id} but it does not match the request (${mismatches.join(", ")}). Check the calendar before trying again.`);
           return {
             output: JSON.stringify({
               created: true,
+              verified: true,
               event: {
                 id: event.id,
                 summary: event.summary,
@@ -606,30 +828,45 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           }
 
           const requestBody: JsonObject = {};
-          if (typeof args.title === "string") requestBody.summary = args.title;
+          const expected: ExpectedEventFields = {};
+          const zones = await calendarZones(port, timezone);
+          if (typeof args.title === "string") {
+            requestBody.summary = args.title;
+            expected.summary = args.title;
+          }
           if (newStart && newEnd) {
-            const zones = await calendarZones(port, timezone);
             const { startValue, endValue, startMs, endMs } = eventWindow(newStart, newEnd, zones);
             if (!startValue.date) {
               const conflict = await busyConflict(port, [{ startMs, endMs }], new Set([eventId]), zones);
-              if (conflict) throw new Error(`That time conflicts with existing event ${conflict.event.id}${conflict.event.summary ? ` (${conflict.event.summary})` : ""}. Choose a free time.`);
+              if (conflict) throw new Error(conflictDescription(conflict.event, { startMs, endMs }, zones));
             }
             requestBody.start = startValue;
             requestBody.end = endValue;
+            expected.start = startValue;
+            expected.end = endValue;
           }
           if (args.clear_description === true) requestBody.description = "";
           else if (typeof args.description === "string") requestBody.description = args.description;
+          if (typeof requestBody.description === "string") expected.description = requestBody.description;
           if (args.clear_location === true) requestBody.location = "";
           else if (typeof args.location === "string") requestBody.location = args.location;
+          if (typeof requestBody.location === "string") expected.location = requestBody.location;
           if (Array.isArray(args.attendees)) {
-            requestBody.attendees = stringArray(args.attendees).map((email) => ({ email: cleanHeader(email) }));
+            const emails = stringArray(args.attendees).map((email) => cleanHeader(email));
+            requestBody.attendees = emails.map((email) => ({ email }));
+            expected.attendees = emails;
           }
           if (Object.keys(requestBody).length === 0) throw new Error("No event changes were provided.");
 
-          const event = await port.patchEvent(eventId, requestBody, "all");
+          await port.patchEvent(eventId, requestBody, "all");
+          const event = await port.getEvent(eventId);
+          if (!event) throw new Error(`Google accepted the edit but event ${eventId} could not be read back. Check the calendar before trying again.`);
+          const mismatches = eventMismatches(event, expected, zones);
+          if (mismatches.length) throw new Error(`Google accepted the edit but event ${eventId} does not match the request (${mismatches.join(", ")}). Check the calendar before trying again.`);
           return {
             output: JSON.stringify({
               edited: true,
+              verified: true,
               event: {
                 id: event.id,
                 summary: event.summary,

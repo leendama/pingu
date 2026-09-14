@@ -1,7 +1,9 @@
 import "./env.js";
 import { createAgentStarter, type StartOutcome } from "./agent-starter.js";
 import { startAgent } from "./agent.js";
+import { spawn } from "node:child_process";
 import { loadConfig, publicUrl, type AssistantConfig } from "./config.js";
+import { ensureLocalSecrets, setupLink } from "./local-secrets.js";
 import { settingsFromConfig, settingsFromEnvironment, type RuntimeSettings } from "./runtime-settings.js";
 import { createSetupServer } from "./setup-server.js";
 
@@ -31,8 +33,15 @@ if (locallyConfigured && !process.env.PHOTON_SETUP_TOKEN) {
   });
 } else {
   const port = Number(process.env.PORT || 3000);
+  const secrets = await ensureLocalSecrets();
   createSetupServer(startConfiguredAgent).listen(port, "0.0.0.0", () => {
-    console.log(`Setup wizard listening on port ${port}.`);
+    if (secrets.generatedToken) {
+      const link = setupLink();
+      console.log(`\nOpen this link to set up Pingu:\n\n  ${link}\n\nIt signs you in to the wizard for this run only.`);
+      if (process.platform === "darwin") spawn("open", [link], { stdio: "ignore", detached: true }).on("error", () => undefined).unref();
+    } else {
+      console.log(`Setup wizard listening on port ${port}.`);
+    }
   });
   void loadConfig().then(async (config) => {
     if (!config?.google.refreshToken) return;

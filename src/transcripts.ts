@@ -1,0 +1,248 @@
+import { createHash } from "node:crypto";
+import { access, readdir, readFile, rm } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
+import { join } from "node:path";
+import type { ResponseInputItem } from "openai/resources/responses/responses";
+import { startPoller } from "./poller.js";
+import { dataPath, JsonFileStore } from "./state.js";
+
+/** Conversation history lives on the owner's disk, one file per chat, for every model provider. */
+export interface TranscriptSettings {
+  /** Entries older than this are dropped on read. 0 keeps no history between messages. */
+  retentionDays: number;
+  /** Compaction keeps at most this many entries. */
+  maxEntries: number;
+  /** Compaction keeps at most roughly this many characters of serialised entries. */
+  maxChars: number;
+}
+
+export const defaultTranscriptSettings: TranscriptSettings = {
+  retentionDays: 30,
+  maxEntries: 80,
+  maxChars: 60_000,
+};
+
+export interface TranscriptEntry {
+  at: string;
+  item: ResponseInputItem;
+}
+
+interface TranscriptFile {
+  version: 1;
+  spaceId: string;
+  entries: TranscriptEntry[];
+}
+
+const TRANSCRIPT_DIRECTORY = "transcripts";
+
+function transcriptFilename(spaceId: string): string {
+  // Space ids are opaque and may contain characters a filesystem rejects; hash them.
+  return `${TRANSCRIPT_DIRECTORY}/${createHash("sha256").update(spaceId).digest("hex").slice(0, 32)}.json`;
+}
+
+const stores = new Map<string, JsonFileStore<TranscriptFile>>();
+
+function storeFor(spaceId: string): JsonFileStore<TranscriptFile> {
+  const filename = transcriptFilename(spaceId);
+  let store = stores.get(filename);
+  if (!store) {
+    store = new JsonFileStore<TranscriptFile>(
+      filename,
+      () => ({ version: 1, spaceId, entries: [] }),
+      (value) => {
+        const record = value && typeof value === "object" ? value as Partial<TranscriptFile> : {};
+        return {
+          version: 1,
+          spaceId,
+          entries: Array.isArray(record.entries)
+            ? record.entries.filter((entry): entry is TranscriptEntry => Boolean(entry && typeof entry === "object" && typeof entry.at === "string" && entry.item && typeof entry.item === "object"))
+            : [],
+        };
+      },
+    );
+    stores.set(filename, store);
+  }
+  return store;
+}
+
+function startsTurn(item: ResponseInputItem): boolean {
+  return item.type === "message" && item.role === "user";
+}
+
+/**
+ * Apply retention and size limits, always cutting at a user message so a
+ * function call never survives without its output, and vice versa.
+ */
+export function compactEntries(entries: TranscriptEntry[], settings: TranscriptSettings, now = Date.now()): TranscriptEntry[] {
+  const cutoff = now - settings.retentionDays * 24 * 60 * 60 * 1000;
+  let kept = entries.filter((entry) => Date.parse(entry.at) >= cutoff);
+  const sizeOf = (list: TranscriptEntry[]) => list.reduce((total, entry) => total + JSON.stringify(entry.item).length, 0);
+  const lastTurn = kept.findLastIndex((entry) => startsTurn(entry.item));
+  if (lastTurn >= 0) {
+    const latest = kept.slice(lastTurn);
+    if (sizeOf(latest) > settings.maxChars || latest.length > settings.maxEntries) {
+      // Drop complete tool exchanges and opaque reasoning together, preserving
+      // the owner's request and the assistant's answer/clarification question.
+      kept = [...kept.slice(0, lastTurn), ...latest.filter((entry) => entry.item.type === "message")];
+    }
+  }
+  while (kept.length > 0 && (kept.length > settings.maxEntries || sizeOf(kept) > settings.maxChars)) {
+    kept = kept.slice(1);
+  }
+  while (kept.length > 0 && !startsTurn(kept[0]!.item)) kept = kept.slice(1);
+  return kept;
+}
+
+/** Read a chat's history. Anything retention or size limits drop is removed from disk in the same step, not merely hidden. */
+export async function readTranscript(spaceId: string, settings: TranscriptSettings, now = Date.now()): Promise<ResponseInputItem[]> {
+  return storeFor(spaceId).update<ResponseInputItem[]>((file) => {
+    const compacted = compactEntries(file.entries, settings, now);
+    const changed = compacted.length !== file.entries.length;
+    file.entries = compacted;
+    return { result: compacted.map((entry) => entry.item), changed };
+  });
+}
+
+/**
+ * Apply retention to every transcript on disk, including chats that never
+ * receive another message. Empty transcripts are deleted outright.
+ */
+export async function cleanupTranscripts(settings: TranscriptSettings, now = Date.now()): Promise<{ trimmed: number; deleted: number }> {
+  const directory = dataPath(TRANSCRIPT_DIRECTORY);
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { trimmed: 0, deleted: 0 };
+    throw error;
+  }
+  let trimmed = 0;
+  let deleted = 0;
+  for (const name of names) {
+    let spaceId: string | undefined;
+    try {
+      const parsed = JSON.parse(await readFile(join(directory, name), "utf8")) as { spaceId?: unknown };
+      spaceId = typeof parsed.spaceId === "string" ? parsed.spaceId : undefined;
+    } catch {
+      spaceId = undefined;
+    }
+    if (!spaceId || transcriptFilename(spaceId) !== `${TRANSCRIPT_DIRECTORY}/${name}`) {
+      // Unreadable or foreign file: it holds nothing Pingu can use, so it goes.
+      await rm(join(directory, name), { force: true });
+      deleted += 1;
+      continue;
+    }
+    // The empty check and the delete happen under the same per-file lock as the
+    // compaction, so a message appended meanwhile can never be swept away.
+    const remaining = await storeFor(spaceId).update<number>((file) => {
+      const compacted = compactEntries(file.entries, settings, now);
+      const changed = compacted.length !== file.entries.length;
+      file.entries = compacted;
+      if (compacted.length === 0) return { result: 0, changed, remove: true };
+      if (changed) trimmed += 1;
+      return { result: compacted.length, changed };
+    });
+    if (remaining === 0) deleted += 1;
+  }
+  return { trimmed, deleted };
+}
+
+export function startTranscriptCleanup(settings: TranscriptSettings, intervalMs = 6 * 60 * 60_000): () => void {
+  return startPoller("Transcript cleanup", intervalMs, async () => {
+    const result = await cleanupTranscripts(settings);
+    if (result.trimmed || result.deleted) console.log("Transcript cleanup:", result);
+  });
+}
+
+export async function appendTranscript(spaceId: string, items: ResponseInputItem[], settings: TranscriptSettings, now = Date.now()): Promise<void> {
+  if (items.length === 0) return;
+  const at = new Date(now).toISOString();
+  await storeFor(spaceId).update((file) => {
+    file.entries = compactEntries([...file.entries, ...items.map((item) => ({ at, item }))], settings, now);
+    return { result: undefined, changed: true };
+  });
+}
+
+export async function forgetTranscript(spaceId: string): Promise<void> {
+  await storeFor(spaceId).update((file) => {
+    file.entries = [];
+    return { result: undefined, changed: true, remove: true };
+  });
+}
+
+export async function deleteAllTranscripts(): Promise<number> {
+  const directory = dataPath(TRANSCRIPT_DIRECTORY);
+  let names: string[];
+  try {
+    names = await readdir(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+  await rm(directory, { recursive: true, force: true });
+  stores.clear();
+  return names.filter((name) => name.endsWith(".json")).length;
+}
+
+/** Every file Pingu writes under the data directory, other than encrypted credentials. */
+export const PINGU_DATA_FILES = [
+  "conversations.json",
+  "reminders.json",
+  "pending-emails.json",
+  "pending-confirmations.json",
+  "email-alerts.json",
+  "guests.json",
+  "owners.json",
+  "scheduling-requests.json",
+  "chief-of-staff.sqlite",
+  "chief-of-staff.sqlite-shm",
+  "chief-of-staff.sqlite-wal",
+];
+
+async function clearChiefOfStaffLedger(): Promise<boolean> {
+  const filename = dataPath("chief-of-staff.sqlite");
+  try {
+    await access(filename);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const db = new DatabaseSync(filename);
+  try {
+    const existing = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const table of ["action_claims", "briefings", "proposals", "preferences", "metadata"]) {
+        if (existing.has(table)) db.exec(`DELETE FROM ${table}`);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    // Rebuild the database and truncate the WAL so deleted proposal and
+    // source-derived text is not left in reusable SQLite pages. This is outside
+    // the transaction because VACUUM cannot run inside one.
+    db.exec("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);");
+  } finally {
+    db.close();
+  }
+  return true;
+}
+
+/** Remove chat history and every runtime record. Encrypted credentials and Google tokens stay so the owner is not signed out. */
+export async function deleteAllPinguData(): Promise<{ transcripts: number; files: string[] }> {
+  const transcripts = await deleteAllTranscripts();
+  const removed: string[] = [];
+  if (await clearChiefOfStaffLedger()) removed.push("chief-of-staff.sqlite");
+  for (const filename of PINGU_DATA_FILES) {
+    if (filename.startsWith("chief-of-staff.sqlite")) continue;
+    try {
+      await rm(dataPath(filename), { force: false });
+      removed.push(filename);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return { transcripts, files: removed };
+}

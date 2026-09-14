@@ -18,9 +18,14 @@ vi.mock("./google.js", () => ({
   }),
 }));
 
+vi.mock("./local-models.js", () => ({
+  detectLocalModelEndpoint: async () => (process.env.TEST_LOCAL_MODEL ? { name: "Ollama", baseUrl: "http://localhost:11434/v1", models: ["qwen3:8b", "llama3.2"] } : undefined),
+  preferredLocalModel: (models: string[]) => models[0],
+}));
+
 vi.mock("./diagnostics.js", () => ({
   runDiagnostics: async () => [
-    { name: "openai", label: "OpenAI", status: "ok", detail: "The key can use gpt-5.6-luna." },
+    { name: "provider", label: "OpenAI", status: "ok", detail: "The key can use gpt-5.6-luna." },
     { name: "google", label: "Google Calendar and Gmail", status: "failed", detail: "Gmail permission is missing. Reconnect Google and approve every permission." },
   ],
 }));
@@ -30,7 +35,7 @@ const servers: Server[] = [];
 
 afterEach(async () => {
   resetRuntimeStatus();
-  for (const name of ["PHOTON_DATA_DIR", "PHOTON_CONFIG_KEY", "PHOTON_SETUP_TOKEN", "PHOTON_PUBLIC_URL"]) delete process.env[name];
+  for (const name of ["PHOTON_DATA_DIR", "PHOTON_CONFIG_KEY", "PHOTON_SETUP_TOKEN", "PHOTON_PUBLIC_URL", "PINGU_OWNER_SENDER_IDS", "PINGU_SHARED_GOOGLE_CLIENT_ID", "PINGU_SHARED_GOOGLE_CLIENT_SECRET", "TEST_LOCAL_MODEL"]) delete process.env[name];
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))));
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
@@ -94,7 +99,10 @@ describe("setup recovery", () => {
     expect(await health.json()).toMatchObject({ ok: true, configured: false, googleConnected: false });
     const setup = await fetch(`${base}/setup`, { headers: { cookie: await loginCookie(base) } });
     expect(setup.status).toBe(200);
-    expect(await setup.text()).toContain("Set up your assistant");
+    const html = await setup.text();
+    expect(html).toContain("Set up your assistant");
+    expect(html).toContain("Planning buffer (minutes)");
+    expect(html).toContain("Offer a one-time history-learning preview");
   });
 });
 
@@ -165,6 +173,19 @@ describe("setup save", () => {
     expect(html).toContain("Saved, but the assistant could not start: Photon authentication failed");
     expect(html).not.toContain("Saved and running.");
   });
+
+  it("saves chief-of-staff planning limits and the history preview choice", async () => {
+    const { base } = await startServer(async () => ({ started: false, reason: "already-running" }));
+    await saveConfig(savedConfig);
+    const { loadConfig } = await import("./config.js");
+    const response = await fetch(`${base}/setup/save`, {
+      method: "POST",
+      headers: { cookie: await loginCookie(base) },
+      body: saveBody({ chiefOfStaffEnabled: "on", chiefOfStaffHistoryImport: "on", chiefOfStaffWorkHours: "08:30-19:00", chiefOfStaffBufferMinutes: "25", chiefOfStaffMinimumNoticeHours: "1.5" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await loadConfig()).toMatchObject({ chiefOfStaffEnabled: true, chiefOfStaffHistoryImport: true, chiefOfStaffWorkHours: "08:30-19:00", chiefOfStaffBufferMinutes: 25, chiefOfStaffMinimumNoticeHours: 1.5 });
+  });
 });
 
 describe("health endpoint privacy", () => {
@@ -229,5 +250,154 @@ describe("google oauth callback", () => {
 
     const setupPage = await fetch(`${base}${callback.headers.get("location")}`, { headers: { cookie: await loginCookie(base) } });
     expect(await setupPage.text()).toContain("Google connected, but the assistant could not start: Photon authentication failed");
+  });
+});
+
+describe("owner claim codes", () => {
+  it("shows a claim code behind the login and lists verified owners", async () => {
+    const { base } = await startServer();
+    const cookie = await loginCookie(base);
+    const before = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(before).toContain("No verified owner yet");
+    const claimed = await (await fetch(`${base}/setup/claim`, { method: "POST", headers: { cookie } })).text();
+    const code = claimed.match(/PINGU-[A-Z0-9]{6}/)?.[0];
+    expect(code).toBeDefined();
+    const { redeemClaimCode } = await import("./owners.js");
+    expect(await redeemClaimCode(code!, { senderId: "+15550101000", spaceId: "dm" })).toBe("verified");
+    const after = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(after).toContain("+15550101000");
+    const removed = await (await fetch(`${base}/setup/owners/remove`, { method: "POST", headers: { cookie }, body: new URLSearchParams({ senderId: "+15550101000" }) })).text();
+    expect(removed).toContain("Owner removed");
+  });
+
+  it("requires authentication to issue a code", async () => {
+    const { base } = await startServer();
+    expect((await fetch(`${base}/setup/claim`, { method: "POST" })).status).toBe(401);
+  });
+});
+
+describe("delete all data", () => {
+  it("refuses without the typed confirmation and deletes with it", async () => {
+    const { base, directory } = await startServer();
+    const cookie = await loginCookie(base);
+    await writeFile(join(directory, "reminders.json"), "[]", "utf8");
+    const refused = await fetch(`${base}/setup/data/delete`, { method: "POST", headers: { cookie }, body: new URLSearchParams({ confirm: "delete" }) });
+    expect(refused.status).toBe(400);
+    expect(await refused.text()).toContain("Nothing was deleted");
+    const deleted = await (await fetch(`${base}/setup/data/delete`, { method: "POST", headers: { cookie }, body: new URLSearchParams({ confirm: "DELETE" }) })).text();
+    expect(deleted).toContain("1 data file(s)");
+  });
+});
+
+describe("saved settings", () => {
+  it("stores endpoint, guest, booking, and privacy settings with checkbox semantics", async () => {
+    const { base } = await startServer(async () => ({ started: false, reason: "already-running" }));
+    await saveConfig(savedConfig);
+    const { loadConfig } = await import("./config.js");
+    await fetch(`${base}/setup/save`, {
+      method: "POST",
+      headers: { cookie: await loginCookie(base) },
+      body: saveBody({ openaiBaseUrl: "http://host.docker.internal:11434/v1", bookableHours: "24h", bookableDays: "all", guestDailyMessageCap: "5", transcriptRetentionDays: "0", defaultMeetingMinutes: "45", telemetry: "on" }),
+    });
+    const config = await loadConfig();
+    expect(config).toMatchObject({ openaiBaseUrl: "http://host.docker.internal:11434/v1", bookableHours: "24h", bookableDays: "all", guestDailyMessageCap: 5, transcriptRetentionDays: 0, defaultMeetingMinutes: 45, telemetry: true, meetLink: false });
+  });
+
+  it("rejects an endpoint that is not a URL", async () => {
+    const { base } = await startServer();
+    await saveConfig(savedConfig);
+    const response = await fetch(`${base}/setup/save`, {
+      method: "POST",
+      headers: { cookie: await loginCookie(base) },
+      body: saveBody({ openaiBaseUrl: "ollama" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("full http(s) URL");
+  });
+});
+
+describe("shared Google app", () => {
+  it("lets the person leave the Google client blank and connects through Pingu's registration on localhost", async () => {
+    process.env.PINGU_SHARED_GOOGLE_CLIENT_ID = "shared-client-id.apps.googleusercontent.com";
+    process.env.PINGU_SHARED_GOOGLE_CLIENT_SECRET = "shared-secret";
+    const { base } = await startServer(async () => ({ started: false, reason: "already-running" }));
+    const cookie = await loginCookie(base);
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("no Google Cloud project is needed");
+    const saved = await fetch(`${base}/setup/save`, { method: "POST", headers: { cookie }, body: saveBody({ googleClientId: "", googleClientSecret: "", photonProjectSecret: "photon-secret", openaiApiKey: "sk-0123456789012345678901234567" }) });
+    expect(saved.status).toBe(200);
+    expect(await saved.text()).toContain("Connect Google to finish.");
+    const { loadConfig } = await import("./config.js");
+    expect((await loadConfig())?.google.clientId).toBeUndefined();
+    const auth = await fetch(`${base}/auth/google`, { headers: { cookie }, redirect: "manual" });
+    expect(auth.status).toBe(302);
+  });
+
+  it("refuses the shared app on a non-localhost host and asks for an own client", async () => {
+    process.env.PINGU_SHARED_GOOGLE_CLIENT_ID = "shared-client-id.apps.googleusercontent.com";
+    process.env.PINGU_SHARED_GOOGLE_CLIENT_SECRET = "shared-secret";
+    const { base } = await startServer();
+    process.env.PHOTON_PUBLIC_URL = "https://pingu.example.com";
+    const cookie = await loginCookie(base);
+    await saveConfig({ ...savedConfig, google: { refreshToken: undefined } });
+    const auth = await fetch(`${base}/auth/google`, { headers: { cookie }, redirect: "manual" });
+    expect(auth.status).toBe(400);
+    expect(await auth.text()).toContain("only works when the wizard is opened at a localhost address");
+  });
+
+  it("still requires an own client when no shared app ships", async () => {
+    const { base } = await startServer();
+    const cookie = await loginCookie(base);
+    const response = await fetch(`${base}/setup/save`, { method: "POST", headers: { cookie }, body: saveBody({ googleClientId: "", googleClientSecret: "", photonProjectSecret: "s", openaiApiKey: "sk-0123456789012345678901234567" }) });
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("Create a Web OAuth client");
+    expect(response.status).toBe(200);
+  });
+});
+
+describe("three-step onboarding", () => {
+  it("signs in through the one-time link and rejects a wrong one", async () => {
+    const { base } = await startServer();
+    const entered = await fetch(`${base}/setup/enter?token=${encodeURIComponent(SETUP_TOKEN)}`, { redirect: "manual" });
+    expect(entered.status).toBe(302);
+    const cookie = entered.headers.get("set-cookie")?.split(";")[0] ?? "";
+    expect((await fetch(`${base}/setup`, { headers: { cookie } })).status).toBe(200);
+    expect((await fetch(`${base}/setup/enter?token=wrong-token-but-long-enough`)).status).toBe(401);
+  });
+
+  it("puts the claim code on screen as the last step once Google is connected and nobody owns Pingu", async () => {
+    const { base } = await startServer();
+    const cookie = await loginCookie(base);
+    await saveConfig(savedConfig);
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("Last step: text this code");
+    expect(page).toMatch(/PINGU-[A-Z0-9]{6}/);
+    const { redeemClaimCode, activeClaimCode } = await import("./owners.js");
+    const code = (await activeClaimCode())!.code;
+    await redeemClaimCode(code, { senderId: "+15550101000", spaceId: "dm" });
+    const after = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(after).not.toContain("Last step: text this code");
+  });
+
+  it("preselects a local model server on a fresh install and saves without an API key", async () => {
+    process.env.TEST_LOCAL_MODEL = "1";
+    const { base } = await startServer(async () => ({ started: false, reason: "already-running" }));
+    const cookie = await loginCookie(base);
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("Found Ollama at");
+    expect(page).toContain('value="qwen3:8b"');
+    expect(page).toContain('value="http://localhost:11434/v1"');
+    const saved = await fetch(`${base}/setup/save`, { method: "POST", headers: { cookie }, body: saveBody({ openaiApiKey: "", openaiBaseUrl: "http://localhost:11434/v1", model: "qwen3:8b", photonProjectSecret: "photon-secret", googleClientSecret: "google-secret" }) });
+    expect(saved.status).toBe(200);
+    const { loadConfig } = await import("./config.js");
+    expect(await loadConfig()).toMatchObject({ openaiApiKey: "local", openaiBaseUrl: "http://localhost:11434/v1", model: "qwen3:8b" });
+  });
+
+  it("points at Photon's dashboard for the line and passes the credentials to the connection test", async () => {
+    const { base } = await startServer();
+    const cookie = await loginCookie(base);
+    const page = await (await fetch(`${base}/setup`, { headers: { cookie } })).text();
+    expect(page).toContain("https://app.photon.codes");
+    expect(page).toContain("proven by Pingu replying");
   });
 });

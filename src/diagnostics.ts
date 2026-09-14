@@ -1,12 +1,15 @@
-import OpenAI from "openai";
+import { imessage } from "@spectrum-ts/imessage";
+import { Spectrum } from "spectrum-ts";
 import { googleClient, googleGrantedScopes, googleScopes } from "./google.js";
 import { granolaPort } from "./granola.js";
+import { createModelClient, describeCapabilities, probeProvider, providerKind, providerProbes, providerReady, type ProviderCapabilities } from "./provider.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
+import { runtimeStatus } from "./runtime-status.js";
 
 export type CheckStatus = "ok" | "failed" | "skipped";
 
 export interface ConnectionCheck {
-  name: "openai" | "google" | "granola" | "photon";
+  name: "provider" | "google" | "granola" | "photon";
   label: string;
   status: CheckStatus;
   /** Plain-language outcome, written for the person fixing it. */
@@ -17,23 +20,31 @@ export interface ConnectionCheck {
 export interface DiagnosticsInput {
   openaiApiKey: string;
   model: string;
+  openaiBaseUrl?: string;
   granolaApiKey?: string;
   google?: RuntimeSettings["google"];
+  photonProjectId?: string;
+  photonProjectSecret?: string;
 }
 
 export interface DiagnosticsProbes {
-  /** Resolve when the key can use the model; throw the provider's failure otherwise. */
-  openai(apiKey: string, model: string): Promise<void>;
+  /** Run the provider capability probe: model listing, response, function call, tool continuation, reasoning parameters. */
+  provider(input: Pick<DiagnosticsInput, "openaiApiKey" | "model" | "openaiBaseUrl">): Promise<ProviderCapabilities>;
   /** Refresh the Google sign-in and return the granted OAuth scopes. */
   googleScopes(google: RuntimeSettings["google"]): Promise<string[]>;
   /** Prove the Calendar API answers for the primary calendar. */
   googleCalendar(google: RuntimeSettings["google"]): Promise<void>;
   granola(apiKey: string): Promise<void>;
+  /** Connect to Photon with the project credentials once, then disconnect. */
+  photon(projectId: string, projectSecret: string): Promise<void>;
+  /** Whether the assistant is already connected in this process, which proves the credentials without a second connection. */
+  agentRunning?(): boolean;
 }
 
 const productionProbes: DiagnosticsProbes = {
-  openai: async (apiKey, model) => {
-    await new OpenAI({ apiKey }).models.retrieve(model);
+  provider: (input) => {
+    const settings = { apiKey: input.openaiApiKey, model: input.model, baseUrl: input.openaiBaseUrl };
+    return probeProvider(providerProbes(createModelClient(settings), settings), providerKind(input.openaiBaseUrl));
   },
   googleScopes: (google) => googleGrantedScopes(google),
   googleCalendar: async (google) => {
@@ -44,31 +55,40 @@ const productionProbes: DiagnosticsProbes = {
   granola: async (apiKey) => {
     await granolaPort(apiKey).listNotes({ pageSize: 1 });
   },
+  photon: async (projectId, projectSecret) => {
+    const app = await Spectrum({ projectId, projectSecret, providers: [imessage.config()], telemetry: false });
+    await app.stop();
+  },
+  agentRunning: () => Boolean(runtimeStatus().startedAt),
 };
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function errorStatus(error: unknown): number | undefined {
-  const status = (error as { status?: unknown }).status;
-  return typeof status === "number" ? status : undefined;
-}
-
-async function checkOpenAi(input: DiagnosticsInput, probes: DiagnosticsProbes): Promise<ConnectionCheck> {
-  const label = "OpenAI";
+async function checkProvider(input: DiagnosticsInput, probes: DiagnosticsProbes): Promise<ConnectionCheck> {
+  const kind = providerKind(input.openaiBaseUrl);
+  const label = kind === "openai" ? "OpenAI" : "Model endpoint";
+  let capabilities: ProviderCapabilities;
   try {
-    await probes.openai(input.openaiApiKey, input.model);
-    return { name: "openai", label, status: "ok", detail: `The key can use ${input.model}.` };
+    capabilities = await probes.provider(input);
   } catch (error) {
-    const status = errorStatus(error);
-    const detail = status === 401
-      ? "OpenAI rejected the API key. Check the key and try again."
-      : status === 404
-        ? `The key works, but the model "${input.model}" is not available to it. Pick another model.`
-        : `OpenAI is unreachable: ${errorText(error)}`;
-    return { name: "openai", label, status: "failed", detail };
+    return { name: "provider", label, status: "failed", detail: `The model endpoint is unreachable: ${errorText(error)}` };
   }
+  const summary = describeCapabilities(capabilities);
+  if (providerReady(capabilities)) {
+    const notes = capabilities.problems.length ? ` Notes: ${capabilities.problems.join(" ")}` : "";
+    return { name: "provider", label, status: "ok", detail: `${input.model} works with function calling (${summary}).${notes}` };
+  }
+  const first = capabilities.problems[0] ?? "the endpoint did not complete the probe";
+  const hint = /401|unauthori[sz]ed|invalid api key|incorrect api key/i.test(first)
+    ? " Check the API key."
+    : /404|not found|does not exist|no such model/i.test(first)
+      ? ` Check that the model "${input.model}" exists on this endpoint.`
+      : kind === "compatible"
+        ? " Pingu needs an OpenAI Responses-compatible endpoint that supports function calling; pick a model that supports tools."
+        : "";
+  return { name: "provider", label, status: "failed", detail: `${first}${hint} (${summary})` };
 }
 
 async function checkGoogle(input: DiagnosticsInput, probes: DiagnosticsProbes): Promise<ConnectionCheck> {
@@ -79,7 +99,7 @@ async function checkGoogle(input: DiagnosticsInput, probes: DiagnosticsProbes): 
   } catch (error) {
     const text = errorText(error);
     const detail = text.includes("invalid_grant")
-      ? "The Google sign-in is no longer valid. Reconnect Google."
+      ? "The Google sign-in is no longer valid. Reconnect Google. If your Google Cloud app is still in Testing, its sign-ins expire after seven days; publish the app to stop that."
       : /ENOENT|no such file/i.test(text)
         ? "Google is not connected. Run `npm run connect:google`, or connect it in the setup wizard."
         : `Google sign-in failed: ${text}`;
@@ -116,22 +136,32 @@ async function checkGranola(input: DiagnosticsInput, probes: DiagnosticsProbes):
   }
 }
 
+async function checkPhoton(input: DiagnosticsInput, probes: DiagnosticsProbes): Promise<ConnectionCheck> {
+  const label = "Photon (iMessage)";
+  if (!input.photonProjectId || !input.photonProjectSecret) {
+    return { name: "photon", label, status: "skipped", detail: "Save the Photon project ID and secret first." };
+  }
+  if (probes.agentRunning?.()) {
+    return { name: "photon", label, status: "ok", detail: "The assistant is connected to Photon. Attach an iMessage line at app.photon.codes if you have not; the final proof is Pingu replying to your text." };
+  }
+  try {
+    await probes.photon(input.photonProjectId, input.photonProjectSecret);
+    return { name: "photon", label, status: "ok", detail: "Photon accepted the project credentials. Attach an iMessage line to this project at app.photon.codes; the final proof is Pingu replying to your text." };
+  } catch (error) {
+    return { name: "photon", label, status: "failed", detail: `Photon rejected the connection: ${errorText(error)}. Check PROJECT_ID and PROJECT_SECRET at app.photon.codes.` };
+  }
+}
+
 /**
  * Test every connection that can be probed without side effects, and say in
- * plain language what is wrong with any that fail. Photon credentials cannot
- * be probed statically — they are verified when the assistant starts, and
- * proven end to end by Pingu replying to a real text.
+ * plain language what is wrong with any that fail. Whether an iMessage line is
+ * attached cannot be read from here; Pingu replying to a real text is the proof.
  */
 export async function runDiagnostics(input: DiagnosticsInput, probes: DiagnosticsProbes = productionProbes): Promise<ConnectionCheck[]> {
   return [
-    await checkOpenAi(input, probes),
+    await checkProvider(input, probes),
     await checkGoogle(input, probes),
     await checkGranola(input, probes),
-    {
-      name: "photon",
-      label: "Photon (iMessage)",
-      status: "skipped",
-      detail: "Verified when the assistant starts — a startup failure reports its reason. The final proof is Pingu replying to your text.",
-    },
+    await checkPhoton(input, probes),
   ];
 }

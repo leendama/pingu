@@ -1,14 +1,16 @@
-import type { Reminder, ReminderRecurrence } from "../reminders.js";
+import type { Reminder, ReminderRecurrence, ReminderViewer } from "../reminders.js";
 import type { PinguPlugin } from "../plugins.js";
 import { capabilityPlugin, stringValue } from "../tools.js";
 
 export interface ReminderStore {
-  create(input: Omit<Reminder, "id" | "createdAt">): Promise<Reminder>;
-  list(spaceId: string): Promise<Reminder[]>;
-  cancel(spaceId: string, reminderId: string): Promise<boolean>;
+  create(input: Omit<Reminder, "id" | "createdAt">, options?: { maxForSender?: number }): Promise<Reminder>;
+  list(spaceId: string, viewer: ReminderViewer): Promise<Reminder[]>;
+  cancel(spaceId: string, reminderId: string, viewer: ReminderViewer): Promise<boolean>;
+  countBySender(senderId: string): Promise<number>;
 }
 
-export function remindersPlugin(store: ReminderStore): PinguPlugin {
+export function remindersPlugin(store: ReminderStore, options: { guestMaxReminders?: number } = {}): PinguPlugin {
+  const guestMax = options.guestMaxReminders ?? 5;
   return capabilityPlugin(
     { id: "reminders", name: "Reminders", description: "Persistent one-time and recurring reminders." },
     [
@@ -37,7 +39,11 @@ export function remindersPlugin(store: ReminderStore): PinguPlugin {
           const recurrence = stringValue(args.recurrence) as ReminderRecurrence | undefined;
           const timezone = stringValue(args.timezone) ?? context.config.timezone;
           if (!text || !dueAt || !recurrence) throw new Error("Reminder text, due time, and recurrence are required.");
-          const reminder = await store.create({ spaceId: context.spaceId, text, dueAt, recurrence, timezone });
+          if (context.role === "guest" && !context.senderId) throw new Error("I can't tell who is sending this message, so I can't keep a reminder for you.");
+          const reminder = await store.create(
+            { spaceId: context.spaceId, text, dueAt, recurrence, timezone, creatorSenderId: context.senderId },
+            context.role === "guest" ? { maxForSender: guestMax } : {},
+          );
           return { output: JSON.stringify({ created: true, reminder }) };
         },
       },
@@ -52,7 +58,7 @@ export function remindersPlugin(store: ReminderStore): PinguPlugin {
         private: false,
         sideEffecting: false,
         run: async (_args, context) => ({
-          output: JSON.stringify({ reminders: await store.list(context.spaceId) }),
+          output: JSON.stringify({ reminders: await store.list(context.spaceId, { senderId: context.senderId, role: context.role }) }),
         }),
       },
       {
@@ -73,7 +79,7 @@ export function remindersPlugin(store: ReminderStore): PinguPlugin {
           const reminderId = stringValue(args.reminder_id);
           if (!reminderId) throw new Error("Reminder ID is required.");
           return {
-            output: JSON.stringify({ cancelled: await store.cancel(context.spaceId, reminderId), reminder_id: reminderId }),
+            output: JSON.stringify({ cancelled: await store.cancel(context.spaceId, reminderId, { senderId: context.senderId, role: context.role }), reminder_id: reminderId }),
           };
         },
       },

@@ -6,7 +6,8 @@ Pingu is an iMessage assistant built with [Spectrum](https://photon.codes/docs/s
 
 - Run the app with `npm run start`.
 - Add providers in `src/agent.ts` and list them in the `Spectrum({ providers: [...] })` config.
-- Add capabilities through `capabilityPlugin` and register them in `src/builtin-plugin.ts` or `src/community-plugins.ts`.
+- Add capabilities through `capabilityPlugin` and register them in `src/builtin-plugin.ts` or `src/community-plugins.ts`. Tools are private (owner direct messages only) unless declared otherwise; see `docs/PLUGINS.md` for the audience fields.
+- Anyone can text the number. `context.role` tells a tool whether the sender is the verified owner or a guest. Never trust a typed phone number as identity; owners are verified by claim code.
 - Outgoing message content uses the builders documented in the skill (text, attachment, voice, contact, richlink, poll, group, custom).
 
 ## Environment

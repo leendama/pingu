@@ -1,10 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { google } from "googleapis";
 import type { CalendarPort } from "./capabilities/calendar.js";
-import { boundedGmailBody, type GmailPort } from "./capabilities/gmail.js";
+import { boundedGmailBody, GmailHistoryExpiredError, type GmailPort } from "./capabilities/gmail.js";
+import { isMissingGoogleResource } from "./google-errors.js";
 import type { JsonObject } from "./tools.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 import { googleCredentialsPath, googleTokenPath } from "./private-paths.js";
+import { ownCredentialsFileExists, sharedGoogleClient } from "./shared-google-client.js";
 
 export const googleScopes = [
   "https://www.googleapis.com/auth/calendar.events",
@@ -27,11 +29,18 @@ async function createGoogleAuth(credentials?: RuntimeSettings["google"]) {
   let redirectUri = credentials?.redirectUri;
   let token: Record<string, unknown> = { refresh_token: credentials?.refreshToken };
   if (!clientId || !clientSecret) {
-    const credentials = JSON.parse(await readFile(googleCredentialsPath(), "utf8"));
-    const keys = credentials.installed ?? credentials.web;
-    clientId = keys.client_id;
-    clientSecret = keys.client_secret;
-    redirectUri = keys.redirect_uris[0];
+    const shared = ownCredentialsFileExists() ? undefined : sharedGoogleClient();
+    if (shared) {
+      clientId = shared.clientId;
+      clientSecret = shared.clientSecret;
+      redirectUri = "http://localhost";
+    } else {
+      const credentials = JSON.parse(await readFile(googleCredentialsPath(), "utf8"));
+      const keys = credentials.installed ?? credentials.web;
+      clientId = keys.client_id;
+      clientSecret = keys.client_secret;
+      redirectUri = keys.redirect_uris[0];
+    }
     token = JSON.parse(await readFile(googleTokenPath(), "utf8"));
   }
   const auth = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
@@ -116,13 +125,21 @@ export function googleCalendarPort(credentials?: RuntimeSettings["google"]): Cal
         throw error;
       }
     },
-    async insertEvent(requestBody: JsonObject, sendUpdates) {
+    async insertEvent(requestBody: JsonObject, sendUpdates, options) {
       const { calendar } = await googleClient(credentials);
-      return (await calendar.events.insert({ calendarId: "primary", sendUpdates, requestBody })).data;
+      return (await calendar.events.insert({
+        calendarId: "primary",
+        sendUpdates,
+        requestBody,
+        ...(options?.conferenceDataVersion ? { conferenceDataVersion: options.conferenceDataVersion } : {}),
+      })).data;
     },
-    async patchEvent(eventId: string, requestBody: JsonObject, sendUpdates) {
+    async patchEvent(eventId: string, requestBody: JsonObject, sendUpdates, options) {
       const { calendar } = await googleClient(credentials);
-      return (await calendar.events.patch({ calendarId: "primary", eventId, sendUpdates, requestBody })).data;
+      return (await calendar.events.patch(
+        { calendarId: "primary", eventId, sendUpdates, requestBody },
+        options?.expectedEtag ? { headers: { "If-Match": options.expectedEtag } } : undefined,
+      )).data;
     },
     async deleteEvent(eventId, sendUpdates) {
       const { calendar } = await googleClient(credentials);
@@ -133,21 +150,55 @@ export function googleCalendarPort(credentials?: RuntimeSettings["google"]): Cal
 
 export function googleGmailPort(credentials?: RuntimeSettings["google"]): GmailPort {
   return {
+    async getHistoryId() {
+      const { gmail } = await googleClient(credentials);
+      const historyId = (await gmail.users.getProfile({ userId: "me" })).data.historyId;
+      if (!historyId) throw new Error("Gmail did not return a history cursor.");
+      return historyId;
+    },
+    async listHistory(startHistoryId) {
+      const { gmail } = await googleClient(credentials);
+      const messageIds = new Set<string>();
+      let pageToken: string | undefined;
+      let historyId = startHistoryId;
+      try {
+        do {
+          const response = await gmail.users.history.list({ userId: "me", startHistoryId, historyTypes: ["messageAdded"], pageToken, maxResults: 500 });
+          for (const entry of response.data.history ?? []) {
+            for (const added of entry.messagesAdded ?? []) if (added.message?.id) messageIds.add(added.message.id);
+          }
+          historyId = response.data.historyId ?? historyId;
+          pageToken = response.data.nextPageToken ?? undefined;
+        } while (pageToken);
+      } catch (error) {
+        const status = typeof error === "object" && error && "code" in error ? Number(error.code) : undefined;
+        if (status === 404) throw new GmailHistoryExpiredError();
+        throw error;
+      }
+      return { historyId, messageIds: [...messageIds] };
+    },
     async searchMessages(query, maxResults) {
       const { gmail } = await googleClient(credentials);
       const list = await gmail.users.messages.list({ userId: "me", q: query, maxResults });
-      return Promise.all((list.data.messages ?? []).map(async ({ id }) => {
-        const response = await gmail.users.messages.get({
-          userId: "me",
-          id: id!,
-          format: "metadata",
-          metadataHeaders: ["From", "To", "Subject", "Date"],
-        });
-        const headers = Object.fromEntries(
-          (response.data.payload?.headers ?? []).map((header) => [header.name?.toLowerCase(), header.value]),
-        );
-        return { id, ...headers, snippet: response.data.snippet };
+      const found = await Promise.all((list.data.messages ?? []).map(async ({ id }) => {
+        try {
+          const response = await gmail.users.messages.get({
+            userId: "me",
+            id: id!,
+            format: "metadata",
+            metadataHeaders: ["From", "To", "Cc", "Bcc", "Subject", "Date"],
+          });
+          const headers = Object.fromEntries(
+            (response.data.payload?.headers ?? []).map((header) => [header.name?.toLowerCase(), header.value]),
+          );
+          return { id, threadId: response.data.threadId, ...headers, snippet: response.data.snippet, labelIds: response.data.labelIds };
+        } catch (error) {
+          // A message can disappear between listing and metadata retrieval.
+          if (isMissingGoogleResource(error)) return undefined;
+          throw error;
+        }
       }));
+      return found.filter((message): message is NonNullable<typeof message> => Boolean(message));
     },
     async readMessage(messageId) {
       const { gmail } = await googleClient(credentials);
@@ -161,22 +212,49 @@ export function googleGmailPort(credentials?: RuntimeSettings["google"]): GmailP
         from: headers.from,
         to: headers.to,
         cc: headers.cc,
+        bcc: headers.bcc,
+        messageIdHeader: headers["message-id"],
+        references: headers.references,
+        autoSubmitted: headers["auto-submitted"],
+        precedence: headers.precedence,
+        listId: headers["list-id"],
+        listUnsubscribe: headers["list-unsubscribe"],
         subject: headers.subject,
         date: headers.date,
+        ...(response.data.internalDate ? { receivedAt: new Date(Number(response.data.internalDate)).toISOString() } : {}),
         snippet: response.data.snippet,
+        labelIds: response.data.labelIds,
         ...boundedGmailBody(response.data.payload),
       };
     },
-    async createDraft(raw) {
+    async readThread(threadId) {
       const { gmail } = await googleClient(credentials);
-      const response = await gmail.users.drafts.create({ userId: "me", requestBody: { message: { raw } } });
+      const response = await gmail.users.threads.get({ userId: "me", id: threadId, format: "full" });
+      return (response.data.messages ?? []).map((message) => {
+        const headers = Object.fromEntries((message.payload?.headers ?? []).map((header) => [header.name?.toLowerCase(), header.value]));
+        return {
+          id: message.id, threadId: message.threadId, from: headers.from, to: headers.to, cc: headers.cc,
+          bcc: headers.bcc, messageIdHeader: headers["message-id"], references: headers.references, autoSubmitted: headers["auto-submitted"], precedence: headers.precedence, listId: headers["list-id"], listUnsubscribe: headers["list-unsubscribe"], subject: headers.subject, date: headers.date,
+          snippet: message.snippet, labelIds: message.labelIds, ...boundedGmailBody(message.payload),
+        };
+      });
+    },
+    async createDraft(raw, threadId) {
+      const { gmail } = await googleClient(credentials);
+      const response = await gmail.users.drafts.create({ userId: "me", requestBody: { message: { raw, ...(threadId ? { threadId } : {}) } } });
       if (!response.data.id) throw new Error("Gmail did not return a draft ID.");
       return response.data.id;
     },
-    async sendDraft(draftId) {
+    async readDraft(draftId) {
       const { gmail } = await googleClient(credentials);
-      const response = await gmail.users.drafts.send({ userId: "me", requestBody: { id: draftId } });
-      return { messageId: response.data.id, threadId: response.data.threadId };
+      const response = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "full" });
+      const message = response.data.message;
+      const headers = Object.fromEntries((message?.payload?.headers ?? []).map((header) => [header.name?.toLowerCase(), header.value]));
+      return { id: response.data.id, message: {
+        id: message?.id, threadId: message?.threadId, from: headers.from, to: headers.to, cc: headers.cc, bcc: headers.bcc,
+        subject: headers.subject, date: headers.date, messageIdHeader: headers["message-id"], references: headers.references,
+        snippet: message?.snippet, labelIds: message?.labelIds, ...boundedGmailBody(message?.payload),
+      } };
     },
   };
 }

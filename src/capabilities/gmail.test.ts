@@ -4,6 +4,7 @@ import type { ToolRunContext } from "../plugins.js";
 import {
   appendPinguSignature,
   boundedGmailBody,
+  createVerifiedGmailDraft,
   GMAIL_BODY_CHAR_LIMIT,
   gmailBodyText,
   gmailPlugin,
@@ -64,6 +65,16 @@ describe("gmailPlugin", () => {
     });
   });
 
+  it("tells the model to look up a person's address before asking the owner", () => {
+    const plugin = gmailPlugin(fakePort({ raws: [], sent: [] }), fakeStore());
+    const instructions = plugin.instructions?.join(" ") ?? "";
+    const search = plugin.tools.find((tool) => tool.type === "function" && tool.name === "search_gmail");
+
+    expect(instructions).toContain("search Gmail before asking");
+    expect(instructions).toContain("headers clearly associate it with that person");
+    expect(search?.type === "function" ? search.description : "").toContain("find a person's email address");
+  });
+
   it("extracts full plain text from nested MIME parts and falls back to HTML", () => {
     const encoded = (value: string) => Buffer.from(value, "utf8").toString("base64url");
     expect(gmailBodyText({
@@ -96,21 +107,16 @@ describe("gmailPlugin", () => {
     expect(gmailBodyText(payload)).toBe("");
   });
 
-  it("creates a draft, stores it pending, and reports draftCreated to the loop", async () => {
+  it("creates a draft for the owner to send manually", async () => {
     const state = { raws: [], sent: [] };
     const store = fakeStore();
     const plugin = gmailPlugin(fakePort(state), store);
 
     const result = await plugin.run("create_gmail_draft", JSON.stringify(draftArgs), chatContext());
-    expect(result.draftCreated).toBe("draft-1");
     const payload = JSON.parse(result.output);
-    expect(payload).toMatchObject({ created: true, draft_id: "draft-1", confirmation_required_to_send: true });
+    expect(payload).toMatchObject({ created: true, draft_id: "draft-1", manual_send_required: true });
     expect(payload.body).toBe(`Midday tomorrow?\n\n${PINGU_EMAIL_SIGNATURE}`);
-    expect(store.byId.get("space-1")).toMatchObject({
-      draftId: "draft-1",
-      subject: "Lunch",
-      body: `Midday tomorrow?\n\n${PINGU_EMAIL_SIGNATURE}`,
-    });
+    expect(store.byId.size).toBe(0);
     const rawEmail = Buffer.from(state.raws[0]!, "base64url").toString("utf8");
     const encodedParts = rawEmail.match(/Content-Transfer-Encoding: base64\r\n\r\n([^\r]+)/g) ?? [];
     const decodedParts = encodedParts.map((part) => Buffer.from(part.split("\r\n\r\n")[1]!, "base64").toString("utf8"));
@@ -120,6 +126,19 @@ describe("gmailPlugin", () => {
     expect(decodedParts[1]).toContain(
       'this email was composed by <a href="https://github.com/leendama/pingu"',
     );
+  });
+
+  it("does not report an ad-hoc draft whose Gmail read-back differs", async () => {
+    const port = fakePort({ raws: [], sent: [] });
+    port.readDraft = async () => ({ id: "draft-1", message: { to: "other@example.com", cc: "", bcc: "", subject: "Lunch", body: "Midday tomorrow?" } });
+    const result = await gmailPlugin(port, fakeStore()).run("create_gmail_draft", JSON.stringify(draftArgs), chatContext());
+    expect(JSON.parse(result.output).error).toMatch(/read-back did not match/);
+  });
+
+  it("accepts Gmail's RFC 2047 encoded Subject header during draft read-back", async () => {
+    const port = fakePort({ raws: [], sent: [] });
+    port.readDraft = async () => ({ id: "draft-1", message: { to: "friend@example.com", cc: "", bcc: "", subject: "=?UTF-8?B?THVuY2g=?=", body: "Midday tomorrow?" } });
+    await expect(createVerifiedGmailDraft(port, draftArgs)).resolves.toBe("draft-1");
   });
 
   it("adds the Pingu signature once", () => {
@@ -150,52 +169,10 @@ describe("gmailPlugin", () => {
     expect(headerSection).not.toMatch(/^X-Injected/m);
   });
 
-  it("refuses to send without a pending draft or without an explicit confirmation", async () => {
-    const state = { raws: [], sent: [] };
-    const store = fakeStore();
-    const plugin = gmailPlugin(fakePort(state), store);
-
-    const notPending = await plugin.run("send_gmail_draft", JSON.stringify({ draft_id: "draft-9" }), chatContext());
-    expect(JSON.parse(notPending.output).error).toMatch(/not awaiting confirmation/);
-
-    await plugin.run("create_gmail_draft", JSON.stringify(draftArgs), chatContext());
-    const unconfirmed = await plugin.run("send_gmail_draft", JSON.stringify({ draft_id: "draft-1" }), chatContext());
-    expect(JSON.parse(unconfirmed.output).error).toMatch(/blocked until the user confirms/);
-    expect(state.sent).toEqual([]);
-  });
-
-  it("sends a confirmed draft and clears the pending record", async () => {
-    const state = { raws: [], sent: [] };
-    const store = fakeStore();
-    const plugin = gmailPlugin(fakePort(state), store);
-    await plugin.run("create_gmail_draft", JSON.stringify(draftArgs), chatContext());
-
-    const result = await plugin.run(
-      "send_gmail_draft",
-      JSON.stringify({ draft_id: "draft-1" }),
-      chatContext({ confirmedEmailDraftId: "draft-1" }),
-    );
-    expect(JSON.parse(result.output)).toEqual({ sent: true, message_id: "msg-1", thread_id: "thread-1" });
-    expect(state.sent).toEqual(["draft-1"]);
-    expect(store.byId.has("space-1")).toBe(false);
-  });
-
-  it("review re-displays the pending draft and reopens the confirmation window", async () => {
-    const store = fakeStore();
-    const plugin = gmailPlugin(fakePort({ raws: [], sent: [] }), store);
-    await plugin.run("create_gmail_draft", JSON.stringify(draftArgs), chatContext());
-
-    const review = await plugin.run("review_gmail_draft", JSON.stringify({ draft_id: "draft-1" }), chatContext());
-    expect(review.draftCreated).toBe("draft-1");
-    expect(JSON.parse(review.output)).toMatchObject({ draft_id: "draft-1", subject: "Lunch" });
-
-    const missing = await plugin.run("review_gmail_draft", JSON.stringify({ draft_id: "draft-9" }), chatContext());
-    expect(JSON.parse(missing.output).error).toMatch(/not pending/);
-  });
-
-  it("declares sending and drafting as side effecting, searching and reviewing as read-only", () => {
+  it("does not expose a sending tool", () => {
     const plugin = gmailPlugin(fakePort({ raws: [], sent: [] }), fakeStore());
-    expect(plugin.sideEffectingTools).toEqual(["create_gmail_draft", "send_gmail_draft"]);
-    expect(plugin.privateTools).toEqual(["search_gmail", "read_gmail_message", "create_gmail_draft", "send_gmail_draft", "review_gmail_draft"]);
+    expect(plugin.sideEffectingTools).toEqual(["create_gmail_draft"]);
+    expect(plugin.privateTools).toEqual(["search_gmail", "read_gmail_message", "create_gmail_draft"]);
+    expect(plugin.tools.some((tool) => tool.type === "function" && tool.name === "send_gmail_draft")).toBe(false);
   });
 });

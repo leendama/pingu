@@ -58,6 +58,8 @@ In your private chat, `remember preference: only interrupt for decisions due tod
 
 Pingu stores its state and conversation history on your machine. Messages are relayed through Photon, and prompts plus the connector results they need are sent to the model provider you configure. Point the model at Ollama or LM Studio and the model part stays on your hardware. Nothing about your calendar or email reaches a guest beyond the free windows you allow. [PRIVACY.md](PRIVACY.md) has the full picture, including what each party can see and how to delete everything.
 
+## Waitlist page
+
 ## Set it up
 
 You need Node.js 22.5 or newer, a [Photon](https://app.photon.codes) project with an iMessage line, a Google account, and either an OpenAI API key or a local model that supports function calling.

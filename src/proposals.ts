@@ -16,7 +16,7 @@ export interface ProposalInput {
   detail: string;
   payload: unknown;
   sourceKey?: string;
-  evidence: { sourceType: string; sourceId?: string; contact?: string; category?: string; ruleIds?: string[]; rationale: string; confidence: number; priority?: "high" | "normal" | "low"; deadlineAt?: string; sourceReceivedAt?: string };
+  evidence: { sourceType: string; sourceId?: string; contact?: string; senderName?: string; category?: string; ruleIds?: string[]; rationale: string; confidence: number; priority?: "high" | "normal" | "low"; deadlineAt?: string; sourceReceivedAt?: string };
   expiresAt: string;
 }
 

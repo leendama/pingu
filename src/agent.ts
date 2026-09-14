@@ -30,6 +30,7 @@ import { startGmailHistoryScheduler } from "./gmail-history.js";
 import { startPoller } from "./poller.js";
 import { handleChiefInterview, operatingBriefText } from "./chief-interview.js";
 import { temporalInstructions } from "./time-context.js";
+import { emailAlertMode } from "./email-alert-policy.js";
 
 export function agentInstructions(settings: RuntimeSettings, pluginInstructions: string[]): string {
   return [
@@ -264,6 +265,10 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     emailAlertStore,
     (query, maxResults) => gmail.searchMessages(query, maxResults),
     async (alert, email) => {
+      // The history scanner owns action-only notifications, including its
+      // durable retries. Raw sender notices would bypass acknowledgement
+      // filtering and duplicate the same email's TLDR.
+      if (settings.chiefOfStaff.enabled && emailAlertMode(proposalLedger, alert.spaceId) === "actionable") return;
       const sender = alert.label || email.from || alert.gmailQuery;
       const subject = email.subject || "(no subject)";
       const preview = email.snippet ? `\n${email.snippet}` : "";

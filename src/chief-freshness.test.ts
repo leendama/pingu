@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProposalLedger, type ProposalInput } from "./proposals.js";
-import { createChiefOfStaff, formatBriefing } from "./chief-of-staff.js";
+import { createChiefOfStaff, formatBriefing, type ChiefOfStaffDeps } from "./chief-of-staff.js";
+import { setEmailAlertMode } from "./email-alert-policy.js";
 import { dueDailyReview } from "./daily-review.js";
 import { freshEmail } from "./email-freshness.js";
 import type { GmailMessage, GmailPort } from "./capabilities/gmail.js";
@@ -25,7 +26,7 @@ async function fixture() {
     gmail: { readMessage, readThread, searchMessages: async () => [] } as unknown as GmailPort,
     calendar: { listEvents: async () => [] } as unknown as CalendarPort,
     planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 0, minimumNoticeHours: 0 },
-    reviewEmail: async () => ({ outcome: "draft" as const, interrupt: true, summary: "Confirm the delivery date", rationale: "A reply is needed", confidence: 0.9, draftBody: "Confirmed." }), now: () => clock };
+    reviewEmail: vi.fn<ChiefOfStaffDeps["reviewEmail"]>(async () => ({ outcome: "draft" as const, interrupt: true, summary: "Confirm the delivery date", rationale: "A reply is needed", confidence: 0.9, draftBody: "Confirmed." })), now: () => clock };
   const create = (input: Partial<ProposalInput> = {}) => ledger.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Confirm the delivery date", detail: "Complete draft", payload: {}, evidence: { sourceType: "gmail", sourceId: "source", rationale: "A reply is needed", confidence: 0.9 }, expiresAt: "2029-01-10T00:00:00Z", ...input }, new Date("2029-01-01T00:00:00Z"));
   const service = createChiefOfStaff(deps);
   const run = () => service.runDailyReview({ date: "2029-01-04", reviewKey: "daily:test", scheduledAt: Date.parse("2029-01-04T09:00:00Z") });
@@ -33,6 +34,38 @@ async function fixture() {
 }
 
 describe("chief freshness and delivery regressions", () => {
+  it.each(["outreach reply", "new personal email", "Updates category"])("alerts once overnight for a normal-priority %s with a short TLDR", async (scenario) => {
+    const f = await fixture();
+    setEmailAlertMode(f.ledger, "owner", "actionable");
+    f.setClock("2029-01-04T00:30:00Z");
+    f.message.receivedAt = "2029-01-04T00:29:00Z";
+    f.message.from = 'Sam Example <sam@example.com>';
+    if (scenario === "Updates category") f.message.labelIds = ["INBOX", "CATEGORY_UPDATES"];
+    if (scenario === "outreach reply") f.readThread.mockResolvedValue([{ id: "outbound", body: "Would you like a demo?", labelIds: ["SENT"] }, f.message]);
+    f.deps.reviewEmail.mockResolvedValue({ outcome: "draft", interrupt: false, priority: "normal", summary: "asks for two times for a demo", rationale: "A scheduling question", confidence: 0.95, draftBody: "I will check my availability." });
+    await f.service.reviewIncomingEmail("source");
+    await f.service.reviewIncomingEmail("source");
+    expect(f.send).toHaveBeenCalledExactlyOnceWith("owner", "1. Sam Example: asks for two times for a demo");
+    expect(f.deps.reviewEmail.mock.calls[0]![0].alertMode).toBe("actionable");
+  });
+
+  it.each(["acknowledgement", "FYI", "uncertain"])("keeps an %s silent even if the reviewer requests an interruption", async (scenario) => {
+    const f = await fixture(); setEmailAlertMode(f.ledger, "owner", "actionable");
+    f.deps.reviewEmail.mockResolvedValue({ outcome: scenario === "acknowledgement" ? "ignore" : scenario === "FYI" ? "fyi" : "draft", interrupt: true, summary: "thanks, received", rationale: "No clear follow-up", confidence: scenario === "uncertain" ? 0.6 : 0.95, draftBody: "Thanks." });
+    await f.service.reviewIncomingEmail("source"); expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("preserves the default urgent-only policy for other installations", async () => {
+    const f = await fixture();
+    f.deps.reviewEmail.mockResolvedValue({ outcome: "draft", interrupt: false, summary: "Confirm availability", rationale: "Normal reply", confidence: 0.95, draftBody: "I will check." });
+    await f.service.reviewIncomingEmail("source"); expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("alerts on an owner decision without a draft or urgent deadline", async () => {
+    const f = await fixture(); setEmailAlertMode(f.ledger, "owner", "actionable");
+    f.deps.reviewEmail.mockResolvedValue({ outcome: "decision", interrupt: false, summary: "choose which date to attend", rationale: "Needs a choice", confidence: 0.95 });
+    await f.service.reviewIncomingEmail("source"); expect(f.send).toHaveBeenCalledOnce();
+  });
   it("rejects three-day-old unseen backlog using source age, not proposal creation", async () => {
     const f = await fixture(); f.message.receivedAt = "2029-01-01T08:00:00Z"; f.create();
     await f.run(); expect(f.send).not.toHaveBeenCalled(); expect(f.readMessage).toHaveBeenCalledWith("source");

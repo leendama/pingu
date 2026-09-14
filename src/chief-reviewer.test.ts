@@ -2,6 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { learnHistoryWithModel, reviewCalendarWithModel, reviewEmailWithModel, type StructuredReviewer } from "./chief-reviewer.js";
 
 describe("chief-of-staff model reviewers", () => {
+  it("supplies explicit action-only alerts and outbound thread provenance without the urgency-only rule", async () => {
+    const call = vi.fn(async () => ({ outcome: "ignore", confidence: 0.95 }));
+    await reviewEmailWithModel({ call }, { alertMode: "actionable", message: { body: "thanks, received" }, thread: [{ body: "An outreach", labelIds: ["SENT"] }], sentContext: [] }, []);
+    const prompt = (call.mock.calls as unknown as Array<[string]>)[0]![0];
+    expect(prompt).toContain('"sentByOwner":true');
+    expect(prompt).toContain("at any hour");
+    expect(prompt).toContain("Acknowledgements such as thanks");
+    expect(prompt).not.toContain("Routine items belong in the 9am list");
+  });
   it("supplies the current email body, thread, and sent examples as untrusted evidence", async () => {
     const call = vi.fn(async (_prompt: string, _tool: Parameters<StructuredReviewer["call"]>[1]) => ({ actionable: true, interrupt: false, summary: "Reply", rationale: "Question", confidence: 0.8, draft_body: "Sure." }));
     await reviewEmailWithModel({ call } as StructuredReviewer, {

@@ -5,6 +5,7 @@ import { ProposalLedger, type Proposal, type PreferenceRule } from "./proposals.
 import { zonedTimestamp } from "./scheduling.js";
 import { isMissingGoogleResource } from "./google-errors.js";
 import { EMAIL_FRESHNESS_MS, emailStillActionable, freshEmail, receivedTime } from "./email-freshness.js";
+import { actionableAlert, emailAlertMode, type EmailAlertMode } from "./email-alert-policy.js";
 
 export interface EmailReview {
   outcome?: "ignore" | "fyi" | "draft" | "decision";
@@ -23,6 +24,7 @@ export interface EmailReviewContext {
   message: GmailMessage;
   thread: GmailMessage[];
   sentContext: GmailMessage[];
+  alertMode?: EmailAlertMode;
 }
 
 export interface CalendarReview {
@@ -64,7 +66,7 @@ function sensitiveEmail(message: GmailMessage): boolean {
 
 /** Bulk and promotional mail is not a chief-of-staff task unless the owner explicitly asks for it. */
 export function isBulkMail(message: GmailMessage): boolean {
-  if (message.labelIds?.some((label) => label === "CATEGORY_PROMOTIONS" || label === "CATEGORY_UPDATES")) return true;
+  if (message.labelIds?.includes("CATEGORY_PROMOTIONS")) return true;
   if (/\b(?:bulk|list|junk)\b/i.test(message.precedence ?? "")) return true;
   return Boolean(message.listId?.trim() || message.listUnsubscribe?.trim());
 }
@@ -188,7 +190,7 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     return valid;
   }
 
-  async function deliverBriefing(spaceId: string, proposals: Proposal[], reviewKey: string, canDeliver = () => true): Promise<void> {
+  async function deliverBriefing(spaceId: string, proposals: Proposal[], reviewKey: string, canDeliver = () => true, compactEmail = false): Promise<void> {
     const existing = deps.ledger.briefing(reviewKey);
     if (existing?.status === "delivered" || existing?.status === "delivery_unknown") return;
     if (!canDeliver()) return;
@@ -206,7 +208,9 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
       deps.ledger.markBriefingDelivered(reviewKey, now());
       return;
     }
-    const text = formatBriefing(boundProposals, now(), deps.timezone);
+    const text = compactEmail
+      ? boundProposals.map((proposal, index) => `${index + 1}. ${concise(proposal.evidence.senderName ?? proposal.evidence.contact ?? "email", 60)}: ${concise(proposal.summary, 180)}`).join("\n")
+      : formatBriefing(boundProposals, now(), deps.timezone);
     if (!deps.ledger.markBriefingAttempt(reviewKey, text)) return;
     try { await deps.deliver(spaceId, text); }
     catch {
@@ -286,20 +290,22 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     const urgent = deterministicallyUrgent(message);
     const preferences = deps.ledger.preferences(now());
     const contactKey = `email_draft:contact:${recipient.toLowerCase()}`;
-    if (!urgent && preferences.some((rule) => rule.key === `${contactKey}:ignored`)) {
+    if (!urgent && preferences.some((rule) => rule.key === `${contactKey}:ignored`) && ownerSpaces.every((spaceId) => emailAlertMode(deps.ledger, spaceId) !== "actionable")) {
       deps.ledger.setMetadata(reviewedKey, now().toISOString());
       return;
     }
     const alwaysSurface = preferences.some((rule) => rule.key === `${contactKey}:always_surface`);
     const lowPriority = preferences.some((rule) => rule.key === `${contactKey}:not_important`);
     for (const ownerSpaceId of ownerSpaces) {
+      const alertMode = emailAlertMode(deps.ledger, ownerSpaceId);
+      if (alertMode !== "actionable" && !urgent && preferences.some((rule) => rule.key === `${contactKey}:ignored`)) continue;
       const prior = existing.find((entry) => entry.ownerSpaceId === ownerSpaceId)?.proposal;
       if (prior) {
         const key = `gmail:${messageId}:${ownerSpaceId}`;
         if (options.interrupt && deps.ledger.briefing(key)) await deliverBriefing(ownerSpaceId, [prior], key);
         continue;
       }
-      const review = await deps.reviewEmail({ message, thread: thread.slice(-20), sentContext }, preferences, ownerSpaceId);
+      const review = await deps.reviewEmail({ message, thread: thread.slice(-20), sentContext, alertMode }, preferences, ownerSpaceId);
       const outcome = review.outcome ?? (review.actionable ? "draft" : "ignore");
       if (outcome === "ignore" || (outcome === "draft" && !review.draftBody?.trim())) {
         continue;
@@ -323,11 +329,12 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
           ...(message.messageIdHeader ? { inReplyTo: message.messageIdHeader } : {}),
           ...(message.references || message.messageIdHeader ? { references: [message.references, message.messageIdHeader].filter(Boolean).join(" ") } : {}),
         } : { messageId: message.id, threadId: message.threadId },
-        evidence: { sourceType: "gmail", sourceId, contact: recipient, category: `email-${outcome}`, ruleIds: preferences.map((rule) => rule.key).slice(0, 20), rationale: review.rationale, confidence: Math.max(0, Math.min(1, review.confidence)), priority: lowPriority ? "low" : alwaysSurface || urgent ? "high" : review.priority ?? "normal", ...(review.deadlineAt ? { deadlineAt: review.deadlineAt } : {}) },
+        evidence: { sourceType: "gmail", sourceId, contact: recipient, senderName: message.from?.includes("<") ? message.from.split("<")[0]!.replaceAll('"', '').trim() || recipient : recipient, category: `email-${outcome}`, ruleIds: preferences.map((rule) => rule.key).slice(0, 20), rationale: review.rationale, confidence: Math.max(0, Math.min(1, review.confidence)), priority: lowPriority ? "low" : alwaysSurface || urgent ? "high" : review.priority ?? "normal", ...(review.deadlineAt ? { deadlineAt: review.deadlineAt } : {}) },
         expiresAt: new Date(now().getTime() + 7 * 86_400_000).toISOString(),
       }, now());
-      if (options.interrupt && (urgent || alwaysSurface || (review.interrupt && !lowPriority))) {
-        await deliverBriefing(ownerSpaceId, [proposal], `gmail:${messageId}:${ownerSpaceId}`);
+      const shouldInterrupt = alertMode === "actionable" ? actionableAlert({ ...review, outcome }) : urgent || alwaysSurface || (review.interrupt && !lowPriority);
+      if (options.interrupt && shouldInterrupt) {
+        await deliverBriefing(ownerSpaceId, [proposal], `gmail:${messageId}:${ownerSpaceId}`, () => true, alertMode === "actionable");
       }
     }
     deps.ledger.setMetadata(reviewedKey, now().toISOString());

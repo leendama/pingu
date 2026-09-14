@@ -51,3 +51,14 @@ Fixed: built-in Gmail results now carry a typed, self-contained `draftPreview` t
 Audit coverage: public source, plugin documentation, default built-in tool metadata and instruction references, optional scheduling/workflow wiring, rich-message delivery handlers, and installed private plugin references. Default built-ins registered 30 tools across eight plugins; their policy references and instruction tool identifiers all resolved. Scheduling's owner-reply handler and voice synthesis are wired in the agent. Workflows use their registered ledger and approved tool list. No second instance of this missing-consumer mismatch was identified in those paths. Compatibility storage remains available to older integrations; it does not enable automatic email sending.
 
 New integration cases exercise the actual Gmail plugin, registry and message pipeline with fake external services and no legacy dependencies, plus three legacy-lookup failure modes. They verify one creation, one review response, full preview content for current plugins, and no false creation failure or email-send confirmation for fallback cases. The audit did not send messages or create live drafts.
+
+
+## Configurable actionable-email alerts
+
+An owner can opt into the `actionable` email alert mode using `setEmailAlertMode(ledger, spaceId, "actionable")`. It is stored separately from inferred preferences. The default remains `urgent` for other installations.
+
+In actionable mode, new reply requests and owner decisions notify during the next history scan, including overnight, without an urgent deadline or VIP requirement. Outbound thread messages are labelled as sent by the owner for the reviewer. Acknowledgements without an outstanding ask, routine FYIs, automatic replies, bulk mail and resolved threads stay silent. Uncertain classifications do not interrupt: draft/decision outcomes require a model-reported confidence of at least 0.85. That threshold is an implementation heuristic, not a calibrated probability of correctness.
+
+Immediate notifications contain the sender and a short TLDR, without approval boilerplate. Raw sender-watch notices are suppressed while actionable mode and chief-of-staff scanning are enabled, so they cannot bypass acknowledgement filtering or duplicate TLDRs. Gmail history retains its durable retry handling. Existing source freshness checks, thread revalidation and delivery deduplication remain active. The Gmail Updates category alone is no longer treated as proof of bulk mail; bulk headers and promotional classification still apply.
+
+Offline regression cases cover normal-priority outreach replies, new personal asks, Updates-labelled requests, overnight delivery, repeated ingestion, owner decisions, acknowledgement/FYI suppression, uncertain classifications and unchanged default behaviour. Previously reviewed messages are not replayed when the policy is enabled.

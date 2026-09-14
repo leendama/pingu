@@ -22,6 +22,8 @@ export interface ToolRunContext {
   sideEffectAttempted: boolean;
   /** True once a tool returned content authored outside this chat (email bodies, meeting notes). Such content never authorises a write. */
   untrustedContentSeen: boolean;
+  /** Set by a reusable workflow. The rest of that turn can call only these tools. */
+  workflowAllowedTools?: readonly string[];
 }
 
 /** The parts of a context that decide which tools exist for a turn. */
@@ -132,8 +134,9 @@ export class PluginRegistry {
   }
 
   /** The tool list the model sees for one turn. A tool an audience may not call is never offered to the model. */
-  toolsFor(audience: ToolAudience): Tool[] {
-    return this.tools.filter((tool) => tool.type === "function" && !this.hiddenReason(tool.name, audience));
+  toolsFor(audience: ToolAudience & Pick<Partial<ToolRunContext>, "workflowAllowedTools">): Tool[] {
+    return this.tools.filter((tool) => tool.type === "function" && !this.hiddenReason(tool.name, audience)
+      && (!audience.workflowAllowedTools || audience.workflowAllowedTools.includes(tool.name)));
   }
 
   isSideEffecting(name: string): boolean {
@@ -148,6 +151,9 @@ export class PluginRegistry {
     const plugin = this.owners.get(name);
     const policy = this.policies.get(name);
     if (!plugin || !policy) return { handled: false };
+    if (context.workflowAllowedTools && !context.workflowAllowedTools.includes(name)) {
+      return { handled: true, output: JSON.stringify({ error: "This workflow is limited to its approved read tools." }) };
+    }
     const hidden = this.hiddenReason(name, context);
     if (hidden) return { handled: true, output: JSON.stringify({ error: hidden }) };
     if (context.untrustedContentSeen && policy.sideEffecting && !policy.safeAfterUntrusted) {

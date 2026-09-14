@@ -19,12 +19,18 @@ Pingu is a self-hosted assistant you text on iMessage. It reads and manages your
 
 - Calendar: search, create, move, recolour, edit, and delete events. Moves are conflict-aware and verified.
 - Gmail: search, read full messages, and create verified drafts for you to send manually.
-- Approval-first chief of staff: review full email threads, prepare drafts, and send a concise 9am decision list.
+- Approval-first chief of staff: review full email threads, prepare drafts, and send up to three fresh decisions at 9am, ranked by deadline and importance. Ordinary briefings stay within 80 words; quiet days send nothing. Urgent alerts contain one item.
 - Daily calendar planning: propose a complete, conflict-checked reshuffle within your hours and buffers, then apply it only after your approval.
 - Email alerts: a text when a chosen sender emails you.
 - Granola: list and read meeting notes.
 - Reminders, tapbacks, read receipts, typing indicators, polls, rich links, contact cards, voice replies.
 - Threaded group replies and group controls (Photon premium).
+
+Before a briefing, Pingu rechecks each email and its latest thread. Routine FYIs, archived or answered messages, and mail older than 24 hours are excluded. Older outstanding items can surface for a deadline within 24 hours or an explicit snooze becoming due; their receipt date is shown. Briefings use the configured timezone from 9–10am and recheck the cutoff before delivery. Set `ASSISTANT_TIMEZONE` explicitly for environment-based installations.
+
+An unconfirmed send is held without automatic resending, including across restarts. Pingu stores the briefing ID and attempted text for diagnosis. This may leave a message undelivered when the provider cannot confirm its outcome; numbered approvals are blocked until a newer briefing is confirmed. Reply `show 1` for details or `approve 1` to create the indicated Gmail draft after confirmed delivery; nothing is emailed automatically. Calendar and history-import approval disclosures remain complete even when longer than 80 words. Questions such as “why?” receive the last confirmed briefing and its rationale as context.
+
+In your private chat, `remember preference: only interrupt for decisions due today` saves guidance for replies and email/calendar review. Up to ten recent preferences are retained; `show operating brief` displays them and `clear message preferences` removes these additions. The optional `start chief interview` collects broader priorities. These preferences guide judgement and do not change tool permissions.
 
 **For anyone else who texts the number**
 

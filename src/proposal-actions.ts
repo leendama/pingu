@@ -130,6 +130,11 @@ export async function executeHistoryImportProposal(ledger: ProposalLedger, propo
   }
 }
 
+/** Only explicit briefing commands may bypass the ongoing conversation. */
+export function isProposalCommand(text: string): boolean {
+  return /^(?:preferences|show today|forget preference\s+\d+|(?:approve|reject|ignore|not important|why|show|done|got it|always surface)\s+\d+(?:\s*:\s*.+)?|not now\s+.+\s+\d+|edit\s+\d+(?:\s*:\s*[\s\S]+)?)$/i.test(text.trim());
+}
+
 export async function handleProposalCommand(input: {
   ledger: ProposalLedger;
   gmail: GmailPort;
@@ -141,6 +146,10 @@ export async function handleProposalCommand(input: {
   runHistoryImport?: (proposal: Proposal) => Promise<void>;
 }): Promise<string | undefined> {
   for (const text of input.texts) {
+    if (!isProposalCommand(text)) continue;
+    if (input.ledger.hasUnconfirmedBriefing(input.ownerSpaceId) && /^(?:approve|show|why|reject|ignore|done|got it|not now|not important|always surface|edit)\b/i.test(text.trim())) {
+      return "I couldn’t confirm which briefing arrived. Ask me about the specific email instead of using its number.";
+    }
     if (/^show today$/i.test(text.trim())) {
       const proposals = input.ledger.currentBriefingProposals(input.ownerSpaceId);
       return proposals.length ? proposals.map((proposal, index) => `${index + 1}. ${proposal.summary}\n${proposalDetail(proposal)}`).join("\n\n") : "There isn't a current briefing to show.";
@@ -211,7 +220,7 @@ export async function handleProposalCommand(input: {
     if (!input.calendar) return "I couldn't apply that calendar plan because Calendar isn't connected.";
     return executeCalendarMoveProposal(input.ledger, input.calendar, command.proposal);
   }
-  if (input.texts.some((text) => /^(approve|edit|reject|ignore|not important|why|show|not now|yes|done|got it|always surface|preferences|forget preference)\b/i.test(text.trim()))) {
+  if (input.texts.some(isProposalCommand)) {
     return "I can't match that to a current proposal. Reply with the number from the latest briefing.";
   }
   return undefined;

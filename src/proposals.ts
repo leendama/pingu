@@ -16,7 +16,7 @@ export interface ProposalInput {
   detail: string;
   payload: unknown;
   sourceKey?: string;
-  evidence: { sourceType: string; sourceId?: string; contact?: string; category?: string; ruleIds?: string[]; rationale: string; confidence: number };
+  evidence: { sourceType: string; sourceId?: string; contact?: string; category?: string; ruleIds?: string[]; rationale: string; confidence: number; priority?: "high" | "normal" | "low"; deadlineAt?: string; sourceReceivedAt?: string };
   expiresAt: string;
 }
 
@@ -31,6 +31,7 @@ export interface Proposal extends ProposalInput {
   payloadHash: string;
   ownerFeedback?: string;
   preferenceKey?: string;
+  lastNotifiedAt?: string;
 }
 
 export type BriefingDeliveryStatus = "pending" | "delivery_unknown" | "delivered";
@@ -44,6 +45,7 @@ export interface BriefingDelivery {
   createdAt: string;
   deliveredAt?: string;
   attempts: number;
+  deliveredText?: string;
 }
 
 export interface PreferenceRule {
@@ -92,7 +94,7 @@ export class ProposalLedger {
     mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
     const version = Number((this.db.prepare("PRAGMA user_version").get() as { user_version?: number }).user_version ?? 0);
-    if (version > 2) {
+    if (version > 3) {
       this.db.close();
       throw new Error(`Chief-of-staff data version ${version} is newer than this Pingu supports.`);
     }
@@ -156,10 +158,51 @@ export class ProposalLedger {
     const preferenceColumns = this.db.prepare("PRAGMA table_info(preferences)").all() as Array<{ name: string }>;
     if (!preferenceColumns.some((column) => column.name === "expires_at")) this.db.exec("ALTER TABLE preferences ADD COLUMN expires_at TEXT");
     if (!preferenceColumns.some((column) => column.name === "review_after")) this.db.exec("ALTER TABLE preferences ADD COLUMN review_after TEXT");
-    this.db.exec("PRAGMA user_version = 2");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!columns.some((column) => column.name === "last_notified_at")) {
+        this.db.exec("ALTER TABLE proposals ADD COLUMN last_notified_at TEXT");
+        // Preserve what the owner has already seen, including superseded briefings.
+        this.db.exec(`UPDATE proposals SET last_notified_at = (
+          SELECT MAX(b.delivered_at) FROM briefings b, json_each(b.proposal_ids_json) item
+          WHERE b.status = 'delivered' AND item.value = proposals.id AND b.owner_space_id = proposals.owner_space_id
+        )`);
+      }
+      const briefingColumns = this.db.prepare("PRAGMA table_info(briefings)").all() as Array<{ name: string }>;
+      if (!briefingColumns.some((column) => column.name === "delivered_text")) this.db.exec("ALTER TABLE briefings ADD COLUMN delivered_text TEXT");
+      this.db.exec("PRAGMA user_version = 3; COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   close(): void { this.db.close(); }
+
+  /**
+   * Before email outcomes existed, every actionable email was stored as an
+   * email-reply proposal. Those rows can turn a FYI or calendar invite into a
+   * misleading Gmail-draft approval after an upgrade. They have never created
+   * a draft, so invalidate them rather than silently carrying old judgement
+   * forward. New rows use email-draft, email-fyi, or email-decision instead.
+   */
+  invalidateLegacyEmailReplyProposals(now = new Date()): number {
+    const rows = this.db.prepare("SELECT id, evidence_json FROM proposals WHERE kind = 'email_draft' AND status IN ('proposed','deferred')").all() as Array<{ id: string; evidence_json: string }>;
+    const ids = rows.flatMap((row) => {
+      try { return (JSON.parse(row.evidence_json) as { category?: unknown }).category === "email-reply" ? [row.id] : []; } catch { return []; }
+    });
+    if (ids.length === 0) return 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const statement = this.db.prepare("UPDATE proposals SET status = 'invalidated', completed_at = ?, outcome = ? WHERE id = ? AND status IN ('proposed','deferred')");
+      for (const id of ids) statement.run(now.toISOString(), "Replaced by Pingu's newer email classification. Review the source message again if action is still needed.", id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return ids.length;
+  }
 
   create(input: ProposalInput, now = new Date()): Proposal {
     if (input.sourceKey) {
@@ -192,20 +235,44 @@ export class ProposalLedger {
   briefing(reviewKey: string): BriefingDelivery | undefined {
     const row = this.db.prepare("SELECT * FROM briefings WHERE review_key = ?").get(reviewKey) as Record<string, unknown> | undefined;
     if (!row) return undefined;
-    return { id: String(row.id), reviewKey: String(row.review_key), ownerSpaceId: String(row.owner_space_id), proposalIds: JSON.parse(String(row.proposal_ids_json)), status: row.status as BriefingDeliveryStatus, createdAt: String(row.created_at), attempts: Number(row.attempts), ...(typeof row.delivered_at === "string" ? { deliveredAt: row.delivered_at } : {}) };
+    return { id: String(row.id), reviewKey: String(row.review_key), ownerSpaceId: String(row.owner_space_id), proposalIds: JSON.parse(String(row.proposal_ids_json)), status: row.status as BriefingDeliveryStatus, createdAt: String(row.created_at), attempts: Number(row.attempts), ...(typeof row.delivered_at === "string" ? { deliveredAt: row.delivered_at } : {}), ...(typeof row.delivered_text === "string" ? { deliveredText: row.delivered_text } : {}) };
   }
 
-  markBriefingAttempt(reviewKey: string): void {
-    this.db.prepare("UPDATE briefings SET status = 'delivery_unknown', attempts = attempts + 1 WHERE review_key = ? AND status != 'delivered'").run(reviewKey);
+  markBriefingAttempt(reviewKey: string, text?: string): boolean {
+    // Claim once, before sending. Unknown delivery is held for reconciliation, never replayed.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const claimed = Number(this.db.prepare("UPDATE briefings SET status = 'delivery_unknown', attempts = attempts + 1, delivered_text = COALESCE(?, delivered_text) WHERE review_key = ? AND status = 'pending'").run(text ?? null, reviewKey).changes) === 1;
+      if (claimed) {
+        const briefing = this.briefing(reviewKey)!;
+        // The new message may already be visible. Old ordinals are no longer safe to approve.
+        this.db.prepare("UPDATE briefings SET superseded_at = ? WHERE owner_space_id = ? AND id != ? AND status IN ('delivered','delivery_unknown') AND superseded_at IS NULL").run(new Date().toISOString(), briefing.ownerSpaceId, briefing.id);
+      }
+      this.db.exec("COMMIT");
+      return claimed;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
-  markBriefingDelivered(reviewKey: string, now = new Date()): void {
+  refreshPendingBriefing(reviewKey: string, ids: string[]): void {
+    this.db.prepare("UPDATE briefings SET proposal_ids_json = ? WHERE review_key = ? AND status = 'pending' AND attempts = 0").run(JSON.stringify(ids), reviewKey);
+  }
+
+  hasUnconfirmedBriefing(ownerSpaceId: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM briefings WHERE owner_space_id = ? AND status = 'delivery_unknown' AND superseded_at IS NULL LIMIT 1").get(ownerSpaceId));
+  }
+
+  markBriefingDelivered(reviewKey: string, now = new Date(), text?: string): void {
     const briefing = this.briefing(reviewKey);
     if (!briefing) throw new Error("The briefing no longer exists.");
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("UPDATE briefings SET superseded_at = ? WHERE owner_space_id = ? AND id != ? AND status = 'delivered' AND superseded_at IS NULL").run(now.toISOString(), briefing.ownerSpaceId, briefing.id);
-      this.db.prepare("UPDATE briefings SET status = 'delivered', delivered_at = ?, superseded_at = NULL WHERE review_key = ?").run(now.toISOString(), reviewKey);
+      if (briefing.proposalIds.length) {
+        this.db.prepare("UPDATE briefings SET superseded_at = ? WHERE owner_space_id = ? AND id != ? AND status = 'delivered' AND superseded_at IS NULL").run(now.toISOString(), briefing.ownerSpaceId, briefing.id);
+      }
+      // Empty reviews are completed silently, never becoming the visible command target.
+      this.db.prepare("UPDATE briefings SET status = 'delivered', delivered_at = ?, superseded_at = ?, delivered_text = COALESCE(?, delivered_text) WHERE review_key = ?").run(now.toISOString(), briefing.proposalIds.length ? null : now.toISOString(), text ?? null, reviewKey);
+      const notified = this.db.prepare("UPDATE proposals SET last_notified_at = ? WHERE id = ? AND owner_space_id = ?");
+      for (const id of briefing.proposalIds) notified.run(now.toISOString(), id, briefing.ownerSpaceId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -214,7 +281,7 @@ export class ProposalLedger {
   }
 
   listOpen(ownerSpaceId: string, now = new Date(), limit = 5, timezone = "UTC"): Proposal[] {
-    this.db.prepare("UPDATE proposals SET status = 'proposed', deferred_until = NULL WHERE owner_space_id = ? AND status = 'deferred' AND deferred_until <= ? AND expires_at > ?").run(ownerSpaceId, localDate(now.getTime(), timezone), now.toISOString());
+    this.db.prepare("UPDATE proposals SET status = 'proposed', last_notified_at = NULL WHERE owner_space_id = ? AND status = 'deferred' AND deferred_until <= ? AND expires_at > ?").run(ownerSpaceId, localDate(now.getTime(), timezone), now.toISOString());
     this.db.prepare("UPDATE proposals SET status = 'expired' WHERE owner_space_id = ? AND status IN ('proposed','deferred') AND expires_at <= ?").run(ownerSpaceId, now.toISOString());
     const rows = this.db.prepare("SELECT id FROM proposals WHERE owner_space_id = ? AND status = 'proposed' ORDER BY created_at ASC LIMIT ?").all(ownerSpaceId, limit) as Array<{ id: string }>;
     return rows.map(({ id }) => this.get(id)!).filter(Boolean);
@@ -224,6 +291,38 @@ export class ProposalLedger {
     const briefing = this.db.prepare("SELECT proposal_ids_json FROM briefings WHERE owner_space_id = ? AND status = 'delivered' AND superseded_at IS NULL ORDER BY delivered_at DESC LIMIT 1").get(ownerSpaceId) as { proposal_ids_json?: string } | undefined;
     if (!briefing?.proposal_ids_json) return [];
     return (JSON.parse(briefing.proposal_ids_json) as string[]).map((id) => this.get(id)).filter((proposal): proposal is Proposal => Boolean(proposal));
+  }
+
+  /** Fresh items first; an existing item returns only when its deadline newly enters the next 24 hours. */
+  briefingCandidates(ownerSpaceId: string, now = new Date(), limit = 3, timezone = "UTC"): Proposal[] {
+    const deadline = (proposal: Proposal) => Date.parse(proposal.evidence.deadlineAt ?? "");
+    const due = (proposal: Proposal) => Number.isFinite(deadline(proposal)) && deadline(proposal) <= now.getTime() + 86_400_000;
+    const importance = (proposal: Proposal) => ({ high: 2, normal: 1, low: 0 })[proposal.evidence.priority ?? "normal"];
+    const action = (proposal: Proposal) => proposal.kind === "email_fyi" ? 0 : 1;
+    return this.listOpen(ownerSpaceId, now, -1, timezone)
+      .filter((proposal) => !this.db.prepare("SELECT 1 FROM briefings b, json_each(b.proposal_ids_json) item WHERE b.status = 'delivery_unknown' AND b.owner_space_id = ? AND item.value = ? LIMIT 1").get(ownerSpaceId, proposal.id))
+      .filter((proposal) => !proposal.lastNotifiedAt || (due(proposal) && deadline(proposal) > Date.parse(proposal.lastNotifiedAt) + 86_400_000))
+      .sort((a, b) => Number(due(b)) - Number(due(a)) || importance(b) - importance(a) || action(b) - action(a)
+        || (Number.isFinite(deadline(a)) ? deadline(a) : Infinity) - (Number.isFinite(deadline(b)) ? deadline(b) : Infinity)
+        || a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit);
+  }
+
+  invalidateUnresolved(id: string, reason: string, now = new Date()): void {
+    this.db.prepare("UPDATE proposals SET status = 'invalidated', completed_at = ?, outcome = ? WHERE id = ? AND status IN ('proposed','deferred')").run(now.toISOString(), reason, id);
+  }
+
+  recordSourceReceipt(id: string, receivedAt: string): void {
+    this.db.prepare("UPDATE proposals SET evidence_json = json_set(evidence_json, '$.sourceReceivedAt', ?) WHERE id = ?").run(receivedAt, id);
+  }
+
+  /** Exact visible message plus current state; caller must enforce owner-DM access. */
+  briefingContext(ownerSpaceId: string): string | undefined {
+    const row = this.db.prepare("SELECT review_key FROM briefings WHERE owner_space_id = ? AND status = 'delivered' AND superseded_at IS NULL ORDER BY delivered_at DESC LIMIT 1").get(ownerSpaceId) as { review_key?: string } | undefined;
+    const briefing = row?.review_key ? this.briefing(row.review_key) : undefined;
+    if (!briefing) return undefined;
+    return JSON.stringify({ deliveredAt: briefing.deliveredAt, text: briefing.deliveredText,
+      items: this.proposalsById(briefing.proposalIds).map((proposal, index) => ({ number: index + 1, kind: proposal.kind, summary: proposal.summary.slice(0, 500), rationale: proposal.evidence.rationale.slice(0, 500), status: proposal.status, expiresAt: proposal.expiresAt })) });
   }
 
   proposalsById(ids: readonly string[]): Proposal[] {
@@ -401,6 +500,7 @@ export class ProposalLedger {
       ...(typeof row.deferred_until === "string" ? { deferredUntil: row.deferred_until } : {}),
       ...(typeof row.owner_feedback === "string" ? { ownerFeedback: row.owner_feedback } : {}),
       ...(typeof row.preference_key === "string" ? { preferenceKey: row.preference_key } : {}),
+      ...(typeof row.last_notified_at === "string" ? { lastNotifiedAt: row.last_notified_at } : {}),
     };
   }
 }

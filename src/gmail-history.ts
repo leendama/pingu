@@ -113,6 +113,23 @@ export function startGmailHistoryScheduler(
   store: GmailCursorStore,
   onMessage: (messageId: string) => Promise<void>,
   intervalMs = 60_000,
+  options: { now?: () => number; onFailure?: () => Promise<void>; onRecovered?: () => void } = {},
 ): () => void {
-  return startPoller("Chief of staff Gmail history", intervalMs, () => ingestGmailHistory(gmail, store, onMessage).then(() => undefined));
+  const now = options.now ?? Date.now;
+  let failures = 0;
+  let retryAfter = 0;
+  return startPoller("Chief of staff Gmail history", intervalMs, async () => {
+    if (now() < retryAfter) return;
+    try {
+      const result = await ingestGmailHistory(gmail, store, onMessage, { now: () => new Date(now()) });
+      failures = 0;
+      retryAfter = 0;
+      if (!result.failed && store.metadataWithPrefix(GMAIL_RETRY_PREFIX).length === 0) options.onRecovered?.();
+    } catch (error) {
+      failures += 1;
+      retryAfter = now() + Math.min(MAX_RETRY_MS, FIRST_RETRY_MS * 2 ** Math.min(failures - 1, 6));
+      await options.onFailure?.();
+      throw error;
+    }
+  });
 }

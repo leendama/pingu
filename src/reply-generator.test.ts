@@ -66,6 +66,18 @@ describe("mayReplayResponseFailure", () => {
 });
 
 describe("createReplyGenerator", () => {
+  it("retains the task and clarification question when recovering from a model error", async () => {
+    const history: ResponseInputItem[] = [
+      { type: "message", role: "user", content: "Spread the lessons across a fortnight." },
+      { type: "function_call", call_id: "old", name: "calendar", arguments: "{}" },
+      { type: "function_call_output", call_id: "old", output: "large result" },
+      { type: "message", role: "assistant", content: "Are two on some days okay?" },
+    ];
+    const { generate, respond, transcripts } = makeGenerator([statusError(400), textResponse("I can use two on some days.")], {}, history);
+    await generate("chat", "2 a day is okay", freshContext());
+    expect(respond.mock.calls[1]![0]).toEqual([history[0], history[3], { type: "message", role: "user", content: "2 a day is okay" }]);
+    expect(transcripts.forget).not.toHaveBeenCalled();
+  });
   it("sends the stored history plus the new message and appends the completed turn", async () => {
     const history: ResponseInputItem[] = [{ type: "message", role: "user", content: "earlier" }];
     const { generate, respond, transcripts } = makeGenerator([textResponse("hi")], {}, history);
@@ -97,11 +109,11 @@ describe("createReplyGenerator", () => {
   });
 
   for (const status of [400, 404]) {
-    it(`retries a ${status} exactly once after forgetting the chat's history`, async () => {
+    it(`retries a ${status} exactly once with dialogue-only history`, async () => {
       const { generate, respond, transcripts } = makeGenerator([statusError(status), textResponse("recovered")]);
       await expect(generate("chat", "hello", freshContext())).resolves.toBe("recovered");
       expect(respond).toHaveBeenCalledTimes(2);
-      expect(transcripts.forget).toHaveBeenCalledOnce();
+      expect(transcripts.forget).not.toHaveBeenCalled();
       expect((respond.mock.calls[1]?.[0] as ResponseInputItem[])).toHaveLength(1);
       expect(transcripts.append).toHaveBeenCalledOnce();
     });
@@ -111,7 +123,7 @@ describe("createReplyGenerator", () => {
     const { generate, respond, transcripts } = makeGenerator([incompleteResponse(), textResponse("recovered")]);
     await expect(generate("chat", "hello", freshContext())).resolves.toBe("recovered");
     expect(respond).toHaveBeenCalledTimes(2);
-    expect(transcripts.forget).toHaveBeenCalledOnce();
+    expect(transcripts.forget).not.toHaveBeenCalled();
   });
 
   it("never retries after a side effect was attempted and leaves the transcript untouched", async () => {

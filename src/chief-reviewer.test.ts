@@ -26,4 +26,13 @@ describe("chief-of-staff model reviewers", () => {
     const reviewer = { call: async () => ({ preferences: [{ key: "email_draft:contact:person@example.com:ignored", value: "Tentative pattern", confidence: 0.6, evidence_count: 2 }] }) } as StructuredReviewer;
     expect(await learnHistoryWithModel(reviewer, { inbox: [], sent: [], calendar: [] })).toMatchObject([{ key: "inferred:email_draft:contact:person@example.com:ignored" }]);
   });
+
+  it("uses the owner's operating brief in both reviewers and rejects ambiguous deadlines", async () => {
+    const call = vi.fn(async () => ({ outcome: "decision", priority: "high", deadline_at: "Friday", moves: [] }));
+    const brief = "Only surface decisions about the launch.";
+    const result = await reviewEmailWithModel({ call }, { message: { body: "A decision" }, thread: [], sentContext: [] }, [], brief);
+    await reviewCalendarWithModel({ call }, [], [], "2029-01-01", { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, brief);
+    expect(result.deadlineAt).toBeUndefined();
+    for (const args of call.mock.calls as unknown as Array<[string]>) expect(args[0]).toContain(brief);
+  });
 });

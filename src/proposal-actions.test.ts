@@ -21,6 +21,17 @@ async function setup() {
 }
 
 describe("proposal commands", () => {
+  it("leaves ordinary clarification replies with the conversation even when a briefing exists", async () => {
+    const { ledger, proposal } = await setup();
+    const createDraft = vi.fn();
+    for (const text of ["Yes", "2 a day is oki", "Why do I need to move them?", "Show me tomorrow’s lessons", "done"]) {
+      expect(await handleProposalCommand({ ledger, gmail: { createDraft } as unknown as GmailPort, ownerSpaceId: "owner", texts: [text] })).toBeUndefined();
+    }
+    expect(createDraft).not.toHaveBeenCalled();
+    expect(ledger.currentBriefingProposals("owner")[0]?.id).toBe(proposal.id);
+    expect(ledger.currentBriefingProposals("owner")[0]?.status).toBe("proposed");
+    ledger.close();
+  });
   it("creates and verifies a threaded Gmail draft after an exact owner approval", async () => {
     const { ledger } = await setup();
     const createDraft = vi.fn(async (_raw: string, threadId?: string) => { expect(threadId).toBe("thread-1"); return "draft-1"; });

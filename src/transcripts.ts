@@ -77,6 +77,15 @@ export function compactEntries(entries: TranscriptEntry[], settings: TranscriptS
   const cutoff = now - settings.retentionDays * 24 * 60 * 60 * 1000;
   let kept = entries.filter((entry) => Date.parse(entry.at) >= cutoff);
   const sizeOf = (list: TranscriptEntry[]) => list.reduce((total, entry) => total + JSON.stringify(entry.item).length, 0);
+  const lastTurn = kept.findLastIndex((entry) => startsTurn(entry.item));
+  if (lastTurn >= 0) {
+    const latest = kept.slice(lastTurn);
+    if (sizeOf(latest) > settings.maxChars || latest.length > settings.maxEntries) {
+      // Drop complete tool exchanges and opaque reasoning together, preserving
+      // the owner's request and the assistant's answer/clarification question.
+      kept = [...kept.slice(0, lastTurn), ...latest.filter((entry) => entry.item.type === "message")];
+    }
+  }
   while (kept.length > 0 && (kept.length > settings.maxEntries || sizeOf(kept) > settings.maxChars)) {
     kept = kept.slice(1);
   }

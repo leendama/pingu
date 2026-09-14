@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { GmailHistoryExpiredError, type GmailPort } from "./capabilities/gmail.js";
-import { GMAIL_HISTORY_CURSOR_KEY, GMAIL_RETRY_PREFIX, ingestGmailHistory } from "./gmail-history.js";
+import { GMAIL_HISTORY_CURSOR_KEY, GMAIL_RETRY_PREFIX, ingestGmailHistory, startGmailHistoryScheduler } from "./gmail-history.js";
 
 function store(initial?: string) {
   const values = new Map<string, string>(initial ? [[GMAIL_HISTORY_CURSOR_KEY, initial]] : []);
@@ -56,5 +56,25 @@ describe("Gmail history ingestion", () => {
       .toEqual({ processed: 1, failed: 1, resynced: true });
     expect(state.values.get(GMAIL_HISTORY_CURSOR_KEY)).toBe("20");
     expect(state.values.get(`${GMAIL_RETRY_PREFIX}recent`)).toBeTruthy();
+  });
+
+  it("backs off whole-mailbox outages and clears the incident after recovery", async () => {
+    vi.useFakeTimers();
+    const listHistory = vi.fn(async () => ({ historyId: "20", messageIds: [] as string[] }));
+    listHistory.mockRejectedValueOnce(new Error("temporary")).mockRejectedValueOnce(new Error("temporary"));
+    const onFailure = vi.fn(async () => {});
+    const onRecovered = vi.fn();
+    const stop = startGmailHistoryScheduler({ listHistory, getHistoryId: async () => "20" } as unknown as GmailPort, store("10"), async () => {}, 60_000, { onFailure, onRecovered });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(listHistory).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(listHistory).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(listHistory).toHaveBeenCalledTimes(3);
+      expect(onFailure).toHaveBeenCalledTimes(2);
+      expect(onRecovered).toHaveBeenCalledOnce();
+    } finally { stop(); vi.useRealTimers(); }
   });
 });

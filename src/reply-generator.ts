@@ -65,9 +65,17 @@ function userMessage(text: string): ResponseInputItem {
   return { type: "message", role: "user", content: text };
 }
 
+/** Keep historical dates as evidence without presenting an old tool result as a live clock. */
+export function markHistoricalClocks(history: ResponseInputItem[]): ResponseInputItem[] {
+  const clockCalls = new Set(history.flatMap((item) => item.type === "function_call" && item.name === "get_current_time" ? [item.call_id] : []));
+  return history.map((item) => item.type === "function_call_output" && clockCalls.has(item.call_id)
+    ? { ...item, output: JSON.stringify({ historical_clock_reading: item.output, warning: "This reading is from an earlier turn, not the current date/time. Use the live runtime clock for the current turn." }) }
+    : item);
+}
+
 /**
  * The model call loop: run tool rounds until the model answers, and recover a
- * recoverable failure exactly once by forgetting the chat's history — never
+ * recoverable failure exactly once using dialogue without tool/reasoning data — never
  * after a side-effecting tool was attempted, and never carrying a previous
  * attempt's delivery outputs into the retry. History is appended only after
  * the turn succeeds, so a failed turn leaves the transcript untouched.
@@ -119,7 +127,7 @@ export function createReplyGenerator(deps: ReplyGeneratorDeps) {
   }
 
   return async function generateReply(spaceId: string, inboundText: string, context: ToolRunContext): Promise<string> {
-    const history = await deps.transcripts.read(spaceId, context);
+    const history = markHistoricalClocks(await deps.transcripts.read(spaceId, context));
     try {
       const turn = await runTurn(history, inboundText, context);
       await deps.transcripts.append(spaceId, turn.newItems);
@@ -131,8 +139,12 @@ export function createReplyGenerator(deps: ReplyGeneratorDeps) {
         sideEffectAttempted: context.sideEffectAttempted,
       })) throw error;
       resetAttemptOutputs(context);
-      await deps.transcripts.forget(spaceId);
-      const turn = await runTurn([], inboundText, context);
+      const dialogue: ResponseInputItem[] = history.flatMap((item) => {
+        if (item.type !== "message" || (item.role !== "user" && item.role !== "assistant")) return [];
+        const text = typeof item.content === "string" ? item.content : item.content.flatMap((part) => "text" in part ? [part.text] : []).join("\n");
+        return text ? [{ type: "message" as const, role: item.role, content: text }] : [];
+      });
+      const turn = await runTurn(dialogue, inboundText, context);
       await deps.transcripts.append(spaceId, turn.newItems);
       return turn.reply;
     }

@@ -4,9 +4,19 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CalendarPort } from "./capabilities/calendar.js";
 import type { GmailPort } from "./capabilities/gmail.js";
-import { createChiefOfStaff, isAutomaticReply, isBulkMail } from "./chief-of-staff.js";
+import { createChiefOfStaff as createRawChiefOfStaff, type ChiefOfStaffDeps, isAutomaticReply, isBulkMail } from "./chief-of-staff.js";
 import { ProposalLedger } from "./proposals.js";
 import { handleProposalCommand } from "./proposal-actions.js";
+
+// Existing service scenarios use complete, freshly received Gmail fixtures.
+function createChiefOfStaff(deps: ChiefOfStaffDeps) {
+  const read = deps.gmail.readMessage;
+  const readMessage = async (id: string) => {
+    const message = await read(id);
+    return { date: (deps.now?.() ?? new Date()).toISOString(), labelIds: ["INBOX"], ...message, threadId: message.threadId ?? message.id };
+  };
+  return createRawChiefOfStaff({ ...deps, gmail: { ...deps.gmail, readMessage, readThread: deps.gmail.readThread ?? (async (id) => [await readMessage(id)]) } });
+}
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
@@ -105,12 +115,12 @@ describe("chief of staff service", () => {
       ledger, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner"], deliver: async (_space, text) => { delivered.push(text); },
       gmail: { readMessage: async () => ({ id: "flight", threadId: "flight", labelIds: ["INBOX"], from: "Travel <travel@example.com>", subject: "Flight departs in four hours", body: "Your flight is on time." }), searchMessages: async () => [] } as unknown as GmailPort,
       calendar: { listEvents: async () => [] } as unknown as CalendarPort,
-      reviewEmail: async () => ({ outcome: "fyi", interrupt: true, summary: "Jetstar JQ504 leaves in about four hours.", rationale: "Check in before leaving.", confidence: 0.95 }),
+      reviewEmail: async () => ({ outcome: "fyi", interrupt: true, summary: "Jetstar JQ504 leaves in about four hours.", rationale: "Check in before leaving.", confidence: 0.95, deadlineAt: "2029-01-01T04:00:00Z" }),
       now: () => new Date("2029-01-01T00:00:00.000Z"),
     });
     await service.reviewIncomingEmail("flight");
     expect(delivered[0]).toContain("Jetstar JQ504 leaves in about four hours.");
-    expect(delivered[0]).toContain("got it 1");
+    expect(delivered[0]).toContain("FYIs need no reply");
     expect(delivered[0]).not.toContain("Gmail draft");
     expect(delivered[0]).not.toContain("Check in before leaving.");
     expect(ledger.parseCommand("owner", "got it 1")?.type).toBe("done");
@@ -121,7 +131,7 @@ describe("chief of staff service", () => {
     const { ledger, delivered, service, calendar } = await setup();
     await service.runDailyReview({ date: "2029-01-01", reviewKey: "daily:test" });
     await service.runDailyReview({ date: "2029-01-01", reviewKey: "daily:test" });
-    expect(delivered).toHaveLength(1);
+    expect(delivered).toHaveLength(0);
     expect(calendar.listEvents).toHaveBeenCalledOnce();
     ledger.close();
   });
@@ -229,13 +239,13 @@ describe("chief of staff service", () => {
     const gmail = { readMessage: async (id: string) => messages.get(id)!, readThread: async () => [{ id: "older", body: "Earlier context" }, messages.get("newest")!], searchMessages } as unknown as GmailPort;
     const service = createChiefOfStaff({ ledger, gmail, calendar: { listEvents: async () => [] } as unknown as CalendarPort, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner"], deliver: async () => {}, reviewEmail, now: () => new Date("2029-01-01T00:00:00.000Z") });
     await service.runDailyReview({ date: "2029-01-01", reviewKey: "daily:thread" });
-    expect(searchMessages).toHaveBeenCalledWith("in:inbox is:unread newer_than:7d", 20);
+    expect(searchMessages).toHaveBeenCalledWith("in:inbox is:unread newer_than:1d", 20);
     expect(searchMessages).toHaveBeenCalledWith("in:sent to:person@example.com", 5);
-    expect(reviewEmail).toHaveBeenCalledWith(expect.objectContaining({ thread: expect.arrayContaining([expect.objectContaining({ id: "older" })]), sentContext: [expect.objectContaining({ id: "sent-1" })] }), []);
+    expect(reviewEmail).toHaveBeenCalledWith(expect.objectContaining({ thread: expect.arrayContaining([expect.objectContaining({ id: "older" })]), sentContext: [expect.objectContaining({ id: "sent-1" })] }), [], "owner");
     ledger.close();
   });
 
-  it("retries an uncertain proposal delivery for only the owner chat that missed it", async () => {
+  it("holds uncertain delivery without replaying it to either owner", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pingu-chief-delivery-retry-"));
     directories.push(directory);
     const ledger = new ProposalLedger(join(directory, "ledger.sqlite"));
@@ -244,14 +254,14 @@ describe("chief of staff service", () => {
     const reviewEmail = vi.fn(async () => ({ actionable: true, interrupt: true, summary: "Reply", rationale: "A direct question.", confidence: 0.9, draftBody: "Sure." }));
     const gmail = { readMessage: async () => ({ id: "message", threadId: "thread", labelIds: ["INBOX"], from: "person@example.com", subject: "Question", body: "Can you reply?" }), searchMessages: async () => [] } as unknown as GmailPort;
     const service = createChiefOfStaff({ ledger, gmail, calendar: { listEvents: async () => [] } as unknown as CalendarPort, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner-one", "owner-two"], deliver: async (space, text) => { if (space === "owner-two" && failSecondOwner) { failSecondOwner = false; throw new Error("delivery uncertain"); } sent.push({ space, text }); }, reviewEmail, now: () => new Date("2029-01-01T00:00:00.000Z") });
-    await expect(service.reviewIncomingEmail("message")).rejects.toThrow("delivery uncertain");
+    await service.reviewIncomingEmail("message");
     ledger.create({ ownerSpaceId: "owner-two", kind: "history_import", summary: "Later proposal", detail: "Must not change the retry's ordinals.", payload: {}, evidence: { sourceType: "history", rationale: "Later", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });
     await service.reviewIncomingEmail("message");
-    expect(reviewEmail).toHaveBeenCalledOnce();
+    expect(reviewEmail).toHaveBeenCalledTimes(2);
     expect(sent.filter(({ space }) => space === "owner-one")).toHaveLength(1);
-    expect(sent.filter(({ space }) => space === "owner-two")).toHaveLength(1);
-    expect(sent.find(({ space }) => space === "owner-two")?.text).toContain("Retrying because the last delivery was uncertain");
-    expect(sent.find(({ space }) => space === "owner-two")?.text).not.toContain("Later proposal");
+    expect(sent.filter(({ space }) => space === "owner-two")).toHaveLength(0);
+    expect(ledger.briefing("gmail:message:owner-two")?.status).toBe("delivery_unknown");
+    expect(ledger.briefing("gmail:message:owner-two")?.attempts).toBe(1);
     ledger.close();
   });
 
@@ -272,7 +282,7 @@ describe("chief of staff service", () => {
     });
     await service.reviewIncomingEmail("urgent");
     expect(delivered[0]).toContain("Urgent reply");
-    expect(delivered[0]).not.toContain("Older 5");
+    expect(delivered[0]).not.toContain("Older");
     ledger.close();
   });
 
@@ -313,21 +323,23 @@ describe("chief of staff service", () => {
     ledger.close();
   });
 
-  it("rejects model plans that move protected events or leave planning hours", async () => {
+  it("discards unsafe model calendar plans without retrying the full daily review", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pingu-chief-calendar-guard-"));
     directories.push(directory);
     const ledger = new ProposalLedger(join(directory, "ledger.sqlite"));
+    const delivered: string[] = [];
     const event = { id: "meeting", summary: "Client meeting", start: { dateTime: "2029-01-01T09:00:00Z" }, end: { dateTime: "2029-01-01T10:00:00Z" } };
     const service = createChiefOfStaff({
       ledger, gmail: { searchMessages: async () => [] } as unknown as GmailPort,
       calendar: { listEvents: async () => [event] } as unknown as CalendarPort,
       timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 },
-      ownerSpaces: async () => ["owner"], deliver: async () => {},
+      ownerSpaces: async () => ["owner"], deliver: async (_space, text) => { delivered.push(text); },
       reviewEmail: async () => ({ actionable: false, interrupt: false, summary: "", rationale: "", confidence: 0 }),
       reviewCalendar: async () => ({ summary: "Move it", detail: "", rationale: "", confidence: 0.8, moves: [{ eventId: "meeting", newStart: "2029-01-01T18:00:00Z", newEnd: "2029-01-01T19:00:00Z", sequenceGroup: null }] }),
       now: () => new Date("2029-01-01T00:00:00.000Z"),
     });
-    await expect(service.runDailyReview({ date: "2029-01-01", reviewKey: "daily:guard" })).rejects.toThrow(/protected event/);
+    await service.runDailyReview({ date: "2029-01-01", reviewKey: "daily:guard" });
+    expect(delivered).toEqual([]);
     expect(ledger.listOpen("owner", new Date("2029-01-01T01:00:00.000Z"))).toEqual([]);
     ledger.close();
   });

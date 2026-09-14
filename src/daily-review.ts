@@ -2,7 +2,7 @@ import { zonedTimestamp } from "./scheduling.js";
 import { startPoller } from "./poller.js";
 
 export const DAILY_REVIEW_MINUTE = 9 * 60;
-export const DAILY_REVIEW_CATCHUP_MS = 6 * 60 * 60 * 1000;
+export const DAILY_REVIEW_CATCHUP_MS = 60 * 60 * 1000;
 
 export function localDate(now: number, timezone: string): string {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
@@ -25,8 +25,21 @@ export function startDailyReviewScheduler(
   options: { now?: () => number; intervalMs?: number } = {},
 ): () => void {
   const now = options.now ?? Date.now;
+  let consecutiveFailures = 0;
+  let retryAfter = 0;
   return startPoller("Chief of staff daily review", options.intervalMs ?? 60_000, async () => {
-    const window = dueDailyReview(now(), timezone);
-    if (window) await run(window);
+    const timestamp = now();
+    if (timestamp < retryAfter) return;
+    const window = dueDailyReview(timestamp, timezone);
+    if (!window) return;
+    try {
+      await run(window);
+      consecutiveFailures = 0;
+      retryAfter = 0;
+    } catch (error) {
+      consecutiveFailures += 1;
+      retryAfter = timestamp + Math.min(60 * 60_000, 60_000 * 2 ** Math.min(consecutiveFailures - 1, 6));
+      throw error;
+    }
   });
 }

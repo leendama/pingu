@@ -38,10 +38,22 @@ describe("ProposalLedger", () => {
     const first = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "First", detail: "", payload: {}, evidence: { sourceType: "gmail", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });
     store.bindBriefing("owner", [first.id], new Date(), "first");
     store.markBriefingDelivered("first");
-    store.bindBriefing("owner", [], new Date(), "second");
+    const second = store.create({ ...first, summary: "Second" });
+    store.bindBriefing("owner", [second.id], new Date(), "second");
     store.markBriefingDelivered("second");
-    expect(store.parseCommand("owner", "approve 1", new Date("2029-01-01T00:00:00.000Z"))).toBeUndefined();
+    expect(store.parseCommand("owner", "approve 1", new Date("2029-01-01T00:00:00.000Z"))?.proposal.id).toBe(second.id);
     store.close();
+  });
+
+  it("invalidates pre-outcome email reply proposals but keeps current drafts", async () => {
+    const store = await ledger();
+    const legacy = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Old", detail: "", payload: {}, evidence: { sourceType: "gmail", category: "email-reply", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });
+    const current = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Current", detail: "", payload: {}, evidence: { sourceType: "gmail", category: "email-draft", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });
+    expect(store.invalidateLegacyEmailReplyProposals(new Date("2029-01-01T00:00:00.000Z"))).toBe(1);
+    expect(store.listOpen("owner", new Date("2029-01-01T00:00:00.000Z")).map((proposal) => proposal.id)).toEqual([current.id]);
+    expect(store.parseCommand("owner", "show 1")).toBeUndefined();
+    store.close();
+    void legacy;
   });
 
   it("never treats an expired proposal as an approval", async () => {
@@ -84,7 +96,7 @@ describe("ProposalLedger", () => {
     store.close();
   });
 
-  it("keeps ordinals bound to the last delivered briefing while a replacement delivery is uncertain", async () => {
+  it("blocks old ordinals when a replacement may already be visible", async () => {
     const store = await ledger();
     const first = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "First", detail: "", payload: {}, evidence: { sourceType: "gmail", sourceId: "one", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });
     const second = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Second", detail: "", payload: {}, evidence: { sourceType: "gmail", sourceId: "two", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00.000Z" });
@@ -92,7 +104,8 @@ describe("ProposalLedger", () => {
     store.markBriefingDelivered("first-delivered");
     store.bindBriefing("owner", [second.id], new Date(), "second-uncertain");
     store.markBriefingAttempt("second-uncertain");
-    expect(store.parseCommand("owner", "show 1", new Date("2029-01-01T00:00:00.000Z"))).toMatchObject({ proposal: { id: first.id } });
+    expect(store.parseCommand("owner", "show 1", new Date("2029-01-01T00:00:00.000Z"))).toBeUndefined();
+    expect(store.hasUnconfirmedBriefing("owner")).toBe(true);
     store.close();
   });
 

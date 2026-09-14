@@ -4,7 +4,7 @@ import { DAILY_REVIEW_CATCHUP_MS, dueDailyReview, startDailyReviewScheduler } fr
 afterEach(() => { vi.useRealTimers(); });
 
 describe("daily chief-of-staff scheduling", () => {
-  it("runs from local 9am through the six-hour catch-up window only", () => {
+  it("runs from local 9am through the one-hour catch-up window only", () => {
     const at = (iso: string) => Date.parse(iso);
     expect(dueDailyReview(at("2026-09-05T22:59:59Z"), "Australia/Melbourne")).toBeUndefined();
     expect(dueDailyReview(at("2026-09-05T23:00:00Z"), "Australia/Melbourne")?.date).toBe("2026-09-06");

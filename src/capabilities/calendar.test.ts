@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getPendingAction } from "../pending-confirmations.js";
 import type { ToolRunContext } from "../plugins.js";
 import { calendarPlugin, calendarRecurrence, deleteConfirmationReason, eventMismatches, type CalendarEventData, type CalendarPort } from "./calendar.js";
@@ -59,6 +59,34 @@ function fakePort(calls: RecordedCall[], initial: CalendarEventData[] = [], cale
 const context = { isGroup: false, role: "owner", spaceId: "chat", config: { timezone: "UTC" }, untrustedContentSeen: false } as ToolRunContext;
 
 describe("calendarPlugin", () => {
+  it("records a requested past morning on its exact date, ignoring a same-time event on the previous day", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2029-03-04T03:00:00Z"));
+    try {
+      const calls: RecordedCall[] = [];
+      const port = fakePort(calls, [{ id: "previous-day", summary: "Meeting", start: { dateTime: "2029-03-03T09:00:00+09:00" }, end: { dateTime: "2029-03-03T10:00:00+09:00" } }], "Asia/Tokyo");
+      const list = vi.spyOn(port, "listEvents");
+      const result = await calendarPlugin(port).run("create_calendar_event", JSON.stringify({
+        title: "Reading", start: "2029-03-04T09:00:00+09:00", end: "2029-03-04T09:30:00+09:00",
+        timezone: "Asia/Tokyo", description: "https://example.com/article", attendees: [], location: null, recurrence: null,
+      }), context);
+      expect(JSON.parse(result.output)).toMatchObject({ created: true, verified: true });
+      expect(list).toHaveBeenCalledWith({ timeMin: "2029-03-04T00:00:00.000Z", timeMax: "2029-03-04T00:30:00.000Z" });
+      expect(calls.find((call) => call.method === "insert")?.requestBody).toMatchObject({ start: { dateTime: "2029-03-04T09:00:00+09:00" }, description: "https://example.com/article" });
+      expect(calls.some((call) => call.method === "delete")).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("returns full requested and conflicting dates, and never writes on a genuine conflict", async () => {
+    const calls: RecordedCall[] = [];
+    const result = await calendarPlugin(fakePort(calls, [{ id: "busy", start: { dateTime: "2029-03-04T09:00:00+09:00" }, end: { dateTime: "2029-03-04T10:00:00+09:00" } }])).run("create_calendar_event", JSON.stringify({
+      title: "Reading", start: "2029-03-04T09:00:00+09:00", end: "2029-03-04T09:30:00+09:00", timezone: "Asia/Tokyo", attendees: [],
+    }), context);
+    expect(JSON.parse(result.output).error).toContain("2029-03-04T00:00:00.000Z");
+    expect(JSON.parse(result.output).error).toContain("2029-03-04T09:00:00+09:00");
+    expect(calls.some((call) => call.method === "insert")).toBe(false);
+  });
+
   it("creates a timed event with the configured timezone and notifies attendees only when present", async () => {
     const calls: RecordedCall[] = [];
     const plugin = calendarPlugin(fakePort(calls));

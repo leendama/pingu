@@ -32,6 +32,8 @@ export interface GmailMessageSummary {
   to?: string | null;
   subject?: string | null;
   date?: string | null;
+  /** Gmail server receipt time; preferred over the sender-controlled Date header. */
+  receivedAt?: string;
   snippet?: string | null;
   labelIds?: string[] | null;
 }

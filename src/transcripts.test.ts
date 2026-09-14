@@ -26,6 +26,18 @@ const output = (id: string): ResponseInputItem => ({ type: "function_call_output
 const at = (daysAgo: number) => new Date(now - daysAgo * 24 * 60 * 60 * 1000).toISOString();
 
 describe("compactEntries", () => {
+  it("preserves a clarification exchange when calendar tool data exceeds the entire budget", () => {
+    const question: ResponseInputItem = { type: "message", role: "assistant", content: "Are two lessons on some days okay?" };
+    const entries: TranscriptEntry[] = [
+      { at: at(0), item: user("Spread the lessons across the next fortnight.") },
+      { at: at(0), item: call("calendar") },
+      { at: at(0), item: { type: "function_call_output", call_id: "calendar", output: "x".repeat(100_000) } },
+      { at: at(0), item: question },
+    ];
+    const kept = compactEntries(entries, settings, now);
+    expect(kept.map((entry) => entry.item)).toEqual([entries[0]!.item, question]);
+    expect(compactEntries([...kept, { at: at(0), item: user("Two a day is okay") }], settings, now).map((entry) => entry.item)).toEqual([entries[0]!.item, question, user("Two a day is okay")]);
+  });
   it("drops entries older than the retention window", () => {
     const entries: TranscriptEntry[] = [
       { at: at(40), item: user("old") },

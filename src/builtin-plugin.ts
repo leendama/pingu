@@ -15,12 +15,15 @@ import { emailAlertStore } from "./email-alerts.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 import type { SchedulingService } from "./scheduling.js";
 import { forgetTranscript } from "./transcripts.js";
+import { workflowsPlugin } from "./capabilities/workflows.js";
+import type { ProposalLedger } from "./proposals.js";
 
 export interface BuiltInOptions {
   /** Register the voice tool. Only an OpenAI provider can synthesise speech. */
   voice?: boolean;
   /** Guest scheduling, when the owner's calendar is connected. */
   scheduling?: SchedulingService;
+  proposalLedger?: ProposalLedger;
 }
 
 export function builtInPlugins(
@@ -37,6 +40,7 @@ export function builtInPlugins(
     remindersPlugin({ create: createReminder, list: listReminders, cancel: cancelReminder, countBySender: countRemindersBySender }, { guestMaxReminders: settings?.guest?.maxReminders }),
     imessagePlugin({ voice: options.voice ?? true }),
     privacyPlugin({ forget: forgetTranscript }),
+    ...(options.proposalLedger ? [workflowsPlugin(options.proposalLedger)] : []),
     ...(options.scheduling
       ? [schedulingPlugin(options.scheduling, {
           ownerName: settings?.ownerName ?? "the owner",

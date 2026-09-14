@@ -326,6 +326,10 @@ export async function busyConflict<TWindow extends { startMs: number; endMs: num
   return undefined;
 }
 
+function conflictDescription(event: CalendarEventData, window: { startMs: number; endMs: number }, zones: CalendarZones): string {
+  return `Requested window ${new Date(window.startMs).toISOString()} to ${new Date(window.endMs).toISOString()} (timezone ${zones.timezone}) conflicts with existing event ${event.id}${event.summary ? ` (${event.summary})` : ""}; event start ${JSON.stringify(event.start)}, end ${JSON.stringify(event.end)}. Check the full dates and timezone against the user's request before suggesting another time.`;
+}
+
 async function validateMovePlan(
   port: CalendarPort,
   prepared: PreparedMove[],
@@ -344,7 +348,7 @@ async function validateMovePlan(
 
   const ignoredIds = new Set([...prepared.map((move) => move.eventId), ...duplicateIds]);
   const conflict = await busyConflict(port, prepared, ignoredIds, zones);
-  if (conflict) throw new Error(`Move for ${conflict.window.eventId} conflicts with existing event ${conflict.event.id}. Choose a free time.`);
+  if (conflict) throw new Error(conflictDescription(conflict.event, conflict.window, zones));
 
   const groups = new Map<string, PreparedMove[]>();
   for (const move of prepared) {
@@ -716,7 +720,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
         schema: {
           type: "function",
           name: "create_calendar_event",
-          description: "Create an event on the user's primary Google Calendar immediately when the request provides an unambiguous title, start, and end or duration.",
+          description: "Create an event on the user's primary Google Calendar when title, date, start and duration are clear. Explicit past dates are supported: do not roll them forward. Use the live runtime date for today/this morning. If correcting a previous booking, read it first and move it instead of creating a duplicate.",
           strict: true,
           parameters: {
             type: "object",
@@ -746,7 +750,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
           // Timed events must land on free time; all-day events coexist with the day's schedule.
           if (!startValue.date) {
             const conflict = await busyConflict(port, [{ startMs, endMs }], new Set(), zones);
-            if (conflict) throw new Error(`That time conflicts with existing event ${conflict.event.id}${conflict.event.summary ? ` (${conflict.event.summary})` : ""}. Choose a free time.`);
+            if (conflict) throw new Error(conflictDescription(conflict.event, { startMs, endMs }, zones));
           }
           const attendees = stringArray(args.attendees).map((email) => ({ email: cleanHeader(email) }));
           const recurrence = calendarRecurrence(stringValue(args.recurrence));
@@ -834,7 +838,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
             const { startValue, endValue, startMs, endMs } = eventWindow(newStart, newEnd, zones);
             if (!startValue.date) {
               const conflict = await busyConflict(port, [{ startMs, endMs }], new Set([eventId]), zones);
-              if (conflict) throw new Error(`That time conflicts with existing event ${conflict.event.id}${conflict.event.summary ? ` (${conflict.event.summary})` : ""}. Choose a free time.`);
+              if (conflict) throw new Error(conflictDescription(conflict.event, { startMs, endMs }, zones));
             }
             requestBody.start = startValue;
             requestBody.end = endValue;

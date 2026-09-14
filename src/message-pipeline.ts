@@ -39,6 +39,8 @@ export interface MessagePipelineDependencies {
   resolveOwnerReply?: (input: { message: Message; texts: readonly string[]; spaceId: string; senderId: string }) => Promise<string | undefined>;
   /** Resolve durable chief-of-staff approval commands before the model sees them. */
   resolveProposalCommand?: (input: { texts: readonly string[]; spaceId: string; senderId: string }) => Promise<string | undefined>;
+  /** Runs the owner-authored chief-of-staff onboarding interview. */
+  resolveChiefInterview?: (input: { texts: readonly string[]; spaceId: string; senderId: string }) => Promise<string | undefined>;
   /** Called once per turn after a reply (text or rich response) reaches the user. */
   onReplyDelivered?: () => void;
 }
@@ -244,6 +246,14 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       const handled = await dependencies.resolveProposalCommand({ texts: directTexts, spaceId: space.id, senderId });
       if (handled) {
         await sendNotice(space, message, false, handled, "chief-of-staff-command");
+        dependencies.onReplyDelivered?.();
+        return;
+      }
+    }
+    if (role === "owner" && senderId && !isGroup && !confirmation.confirmedDraftId && !action.confirmedActionKey && dependencies.resolveChiefInterview) {
+      const handled = await dependencies.resolveChiefInterview({ texts: directTexts, spaceId: space.id, senderId });
+      if (handled) {
+        await sendNotice(space, message, false, handled, "chief-of-staff-interview");
         dependencies.onReplyDelivered?.();
         return;
       }

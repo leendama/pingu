@@ -27,7 +27,7 @@ describe("agent wiring", () => {
     expect(instructions).toContain("UTC");
     expect(instructions).toContain("Plugin instruction");
     expect(instructions).toContain("fewest words possible");
-    expect(instructions).toContain("2 to 12 words");
+    expect(instructions).toContain("usually under 60 words");
     expect(instructions).toContain("do not guess or act");
     expect(instructions).toContain("search Gmail for that person before asking");
     expect(instructions).toContain("nothing reliable or returns conflicting possibilities");

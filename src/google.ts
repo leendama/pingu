@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { google } from "googleapis";
 import type { CalendarPort } from "./capabilities/calendar.js";
 import { boundedGmailBody, GmailHistoryExpiredError, type GmailPort } from "./capabilities/gmail.js";
+import { isMissingGoogleResource } from "./google-errors.js";
 import type { JsonObject } from "./tools.js";
 import type { RuntimeSettings } from "./runtime-settings.js";
 import { googleCredentialsPath, googleTokenPath } from "./private-paths.js";
@@ -179,18 +180,25 @@ export function googleGmailPort(credentials?: RuntimeSettings["google"]): GmailP
     async searchMessages(query, maxResults) {
       const { gmail } = await googleClient(credentials);
       const list = await gmail.users.messages.list({ userId: "me", q: query, maxResults });
-      return Promise.all((list.data.messages ?? []).map(async ({ id }) => {
-        const response = await gmail.users.messages.get({
-          userId: "me",
-          id: id!,
-          format: "metadata",
-          metadataHeaders: ["From", "To", "Cc", "Bcc", "Subject", "Date"],
-        });
-        const headers = Object.fromEntries(
-          (response.data.payload?.headers ?? []).map((header) => [header.name?.toLowerCase(), header.value]),
-        );
-        return { id, threadId: response.data.threadId, ...headers, snippet: response.data.snippet, labelIds: response.data.labelIds };
+      const found = await Promise.all((list.data.messages ?? []).map(async ({ id }) => {
+        try {
+          const response = await gmail.users.messages.get({
+            userId: "me",
+            id: id!,
+            format: "metadata",
+            metadataHeaders: ["From", "To", "Cc", "Bcc", "Subject", "Date"],
+          });
+          const headers = Object.fromEntries(
+            (response.data.payload?.headers ?? []).map((header) => [header.name?.toLowerCase(), header.value]),
+          );
+          return { id, threadId: response.data.threadId, ...headers, snippet: response.data.snippet, labelIds: response.data.labelIds };
+        } catch (error) {
+          // A message can disappear between listing and metadata retrieval.
+          if (isMissingGoogleResource(error)) return undefined;
+          throw error;
+        }
       }));
+      return found.filter((message): message is NonNullable<typeof message> => Boolean(message));
     },
     async readMessage(messageId) {
       const { gmail } = await googleClient(credentials);
@@ -213,6 +221,7 @@ export function googleGmailPort(credentials?: RuntimeSettings["google"]): GmailP
         listUnsubscribe: headers["list-unsubscribe"],
         subject: headers.subject,
         date: headers.date,
+        ...(response.data.internalDate ? { receivedAt: new Date(Number(response.data.internalDate)).toISOString() } : {}),
         snippet: response.data.snippet,
         labelIds: response.data.labelIds,
         ...boundedGmailBody(response.data.payload),

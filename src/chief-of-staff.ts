@@ -1,8 +1,10 @@
 import type { CalendarPort } from "./capabilities/calendar.js";
 import type { GmailMessage, GmailPort } from "./capabilities/gmail.js";
-import { localDate } from "./daily-review.js";
+import { dueDailyReview, localDate } from "./daily-review.js";
 import { ProposalLedger, type Proposal, type PreferenceRule } from "./proposals.js";
 import { zonedTimestamp } from "./scheduling.js";
+import { isMissingGoogleResource } from "./google-errors.js";
+import { EMAIL_FRESHNESS_MS, emailStillActionable, freshEmail, receivedTime } from "./email-freshness.js";
 
 export interface EmailReview {
   outcome?: "ignore" | "fyi" | "draft" | "decision";
@@ -13,6 +15,8 @@ export interface EmailReview {
   rationale: string;
   confidence: number;
   draftBody?: string;
+  priority?: "high" | "normal" | "low";
+  deadlineAt?: string;
 }
 
 export interface EmailReviewContext {
@@ -36,9 +40,9 @@ export interface ChiefOfStaffDeps {
   timezone: string;
   ownerSpaces(): Promise<string[]>;
   deliver(spaceId: string, text: string): Promise<void>;
-  reviewEmail(context: EmailReviewContext, preferences: PreferenceRule[]): Promise<EmailReview>;
+  reviewEmail(context: EmailReviewContext, preferences: PreferenceRule[], ownerSpaceId: string): Promise<EmailReview>;
   planning: { workdayStart: string; workdayEnd: string; bufferMinutes: number; minimumNoticeHours: number };
-  reviewCalendar?(events: unknown[], preferences: PreferenceRule[], date: string, planning: ChiefOfStaffDeps["planning"]): Promise<CalendarReview | undefined>;
+  reviewCalendar?(events: unknown[], preferences: PreferenceRule[], date: string, planning: ChiefOfStaffDeps["planning"], ownerSpaceId: string): Promise<CalendarReview | undefined>;
   learnHistory?(input: { inbox: unknown[]; sent: unknown[]; calendar: unknown[] }): Promise<Array<Omit<PreferenceRule, "updatedAt">>>;
   now?: () => Date;
 }
@@ -75,11 +79,10 @@ export function isAutomaticReply(message: GmailMessage): boolean {
   return /^(?:mailer-daemon|postmaster|auto(?:matic)?[-_.]?reply)$/.test(sender);
 }
 
-function deterministicallyUrgent(message: GmailMessage, now: Date, timezone: string): boolean {
+function deterministicallyUrgent(message: GmailMessage): boolean {
   const text = `${message.subject ?? ""}\n${message.snippet ?? ""}\n${message.body.slice(0, 2_000)}`.toLowerCase();
-  const today = localDate(now.getTime(), timezone);
-  return /\b(urgent|action required|security alert|password reset|cancelled|canceled|rescheduled|interview|booking change|due today|deadline today)\b/.test(text)
-    || text.includes(today);
+  return /\b(security alert|booking change|due today|deadline today)\b/.test(text)
+    || /\b(meeting|flight|appointment)\b.{0,60}\b(cancelled|canceled|rescheduled)\b/.test(text);
 }
 
 function concise(value: string, maximum = 180): string {
@@ -87,19 +90,20 @@ function concise(value: string, maximum = 180): string {
   return normalized.length <= maximum ? normalized : `${normalized.slice(0, maximum - 1).trimEnd()}…`;
 }
 
-function formatProposal(proposal: Proposal, ordinal: number): string {
-  const boundary = proposal.kind === "email_draft"
-    ? `Reply: approve ${ordinal}, show ${ordinal}, or ignore ${ordinal}. I only create a Gmail draft.`
-    : proposal.kind === "email_fyi"
-      ? `Reply: got it ${ordinal} or show ${ordinal}.`
-      : proposal.kind === "email_decision"
-        ? `Reply: show ${ordinal}, done ${ordinal}, not now <day> ${ordinal}, or ignore ${ordinal}.`
-    : proposal.kind === "calendar_move"
-      ? `Approve to apply ${(proposal.payload as { moves?: unknown[] }).moves?.length ?? 0} calendar change(s).`
-      : "Approve to start this one-time history import.";
-  const rationale = proposal.kind === "email_draft" || proposal.kind === "email_decision" ? concise(proposal.evidence.rationale, 120) : undefined;
-  const showDetail = proposal.kind === "history_import" || proposal.kind === "calendar_move";
-  return [`${ordinal}. ${concise(proposal.summary)}`, rationale, ...(showDetail ? [concise(proposal.detail)] : []), boundary].filter(Boolean).join("\n");
+function formatProposal(proposal: Proposal, ordinal: number, now: Date, timezone: string): string {
+  const words = proposal.summary.trim().split(/\s+/);
+  const summary = words.length <= 16 && proposal.summary.length <= 180
+    ? proposal.summary.trim()
+    : proposal.kind === "email_draft" ? "A reply request needs your review. Open details for the complete request."
+    : "An item needs your review. Open details for the complete information.";
+  const label = proposal.kind === "email_draft" ? "Draft" : proposal.kind === "email_fyi" ? "FYI" : "Decision";
+  const received = Date.parse(proposal.evidence.sourceReceivedAt ?? "");
+  const age = now.getTime() - received > EMAIL_FRESHNESS_MS ? ` [${new Intl.DateTimeFormat("en-GB", { timeZone: timezone, day: "numeric", month: "short" }).format(received).replace(/\s/g, "")}]` : "";
+  const line = `${ordinal}. ${label}${age}: ${summary}`;
+  // Approval disclosures keep exact details. They are explicit exceptions to the ordinary text budget.
+  if (proposal.kind === "calendar_move") return `${line}\n${proposal.detail}\nApprove to apply ${(proposal.payload as { moves?: unknown[] }).moves?.length ?? 0} calendar change(s).`;
+  if (proposal.kind === "history_import") return `${line}\n${proposal.detail}\nApprove to start this one-time history import.`;
+  return line;
 }
 
 function calendarEvidence(events: unknown[]): unknown[] {
@@ -151,33 +155,78 @@ function conciseTimestamp(value: string, timezone: string): string {
   return new Intl.DateTimeFormat("en-GB", { timeZone: timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(timestamp));
 }
 
-export function formatBriefing(proposals: Proposal[]): string {
-  if (proposals.length === 0) return "Nothing worth your attention right now.";
-  return ["Quick chief-of-staff check:", ...proposals.map((proposal, index) => formatProposal(proposal, index + 1))].join("\n\n");
+export function formatBriefing(proposals: Proposal[], now = new Date(), timezone = "UTC"): string {
+  if (proposals.length === 0) return "";
+  const draft = proposals.findIndex((proposal) => proposal.kind === "email_draft");
+  const help = draft >= 0 ? `show 1 for details; approve ${draft + 1} creates a Gmail draft. Nothing sent.` : "show 1 for details. FYIs need no reply.";
+  return [...proposals.map((proposal, index) => formatProposal(proposal, index + 1, now, timezone)), help].join("\n\n");
 }
 
 export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
   const now = deps.now ?? (() => new Date());
 
-  async function deliverBriefing(spaceId: string, proposals: Proposal[], reviewKey: string): Promise<void> {
-    const briefing = deps.ledger.bindBriefing(spaceId, proposals.map((proposal) => proposal.id), now(), reviewKey);
-    if (briefing.status === "delivered") return;
-    const boundProposals = deps.ledger.proposalsById(briefing.proposalIds);
-    const uncertainRetry = briefing.status === "delivery_unknown" || briefing.attempts > 0;
-    deps.ledger.markBriefingAttempt(reviewKey);
-    await deps.deliver(spaceId, `${uncertainRetry ? "Retrying because the last delivery was uncertain.\n\n" : ""}${formatBriefing(boundProposals)}`);
-    deps.ledger.markBriefingDelivered(reviewKey, now());
+  async function revalidate(proposal: Proposal): Promise<boolean> {
+    if (!proposal.kind.startsWith("email_")) return true;
+    const id = proposal.evidence.sourceId;
+    if (!id) { deps.ledger.invalidateUnresolved(proposal.id, "Source message is unavailable.", now()); return false; }
+    let valid = false;
+    try {
+      const message = await deps.gmail.readMessage(id);
+      // A thread-capable connector is required to prove that no later reply resolved this request.
+      const thread = message.threadId && deps.gmail.readThread ? await deps.gmail.readThread(message.threadId) : [];
+      const deadline = Date.parse(proposal.evidence.deadlineAt ?? "");
+      const dueSoon = deadline > now().getTime() && deadline <= now().getTime() + EMAIL_FRESHNESS_MS;
+      const snoozed = proposal.deferredUntil === localDate(now().getTime(), deps.timezone);
+      valid = emailStillActionable(message, thread, now())
+        && (freshEmail(message, now()) || dueSoon || snoozed)
+        && (proposal.kind !== "email_fyi" || dueSoon || snoozed);
+      if (valid) deps.ledger.recordSourceReceipt(proposal.id, new Date(receivedTime(message)).toISOString());
+    } catch (error) {
+      if (!isMissingGoogleResource(error)) throw error;
+    }
+    if (!valid) deps.ledger.invalidateUnresolved(proposal.id, "Source is stale, resolved, unavailable, or needs no attention now.", now());
+    return valid;
   }
 
-  function interruptProposals(ownerSpaceId: string, proposal: Proposal): Proposal[] {
-    const open = deps.ledger.listOpen(ownerSpaceId, now(), 5, deps.timezone);
-    return [proposal, ...open.filter((item) => item.id !== proposal.id)].slice(0, 5);
+  async function deliverBriefing(spaceId: string, proposals: Proposal[], reviewKey: string, canDeliver = () => true): Promise<void> {
+    const existing = deps.ledger.briefing(reviewKey);
+    if (existing?.status === "delivered" || existing?.status === "delivery_unknown") return;
+    if (!canDeliver()) return;
+    if (existing) proposals = deps.ledger.proposalsById(existing.proposalIds);
+    const selected: Proposal[] = [];
+    for (const proposal of proposals) {
+      if (await revalidate(proposal)) selected.push(proposal);
+      if (selected.length === 3) break;
+    }
+    if (!canDeliver()) return;
+    if (existing) deps.ledger.refreshPendingBriefing(reviewKey, selected.map((proposal) => proposal.id));
+    const briefing = deps.ledger.bindBriefing(spaceId, selected.map((proposal) => proposal.id), now(), reviewKey);
+    const boundProposals = deps.ledger.proposalsById(briefing.proposalIds);
+    if (!boundProposals.length) {
+      deps.ledger.markBriefingDelivered(reviewKey, now());
+      return;
+    }
+    const text = formatBriefing(boundProposals, now(), deps.timezone);
+    if (!deps.ledger.markBriefingAttempt(reviewKey, text)) return;
+    try { await deps.deliver(spaceId, text); }
+    catch {
+      console.warn("Chief briefing delivery is unconfirmed; automatic resend suppressed.");
+      return;
+    }
+    deps.ledger.markBriefingDelivered(reviewKey, now(), text);
   }
 
   async function reviewEmailCandidate(messageId: string, options: { interrupt: boolean }): Promise<void> {
     const ownerSpaces = await deps.ownerSpaces();
     if (ownerSpaces.length === 0) throw new Error("Chief-of-staff email review is waiting for a verified owner chat.");
-    const message = await deps.gmail.readMessage(messageId);
+    let message: GmailMessage;
+    try {
+      message = await deps.gmail.readMessage(messageId);
+    } catch (error) {
+      if (!isMissingGoogleResource(error)) throw error;
+      deps.ledger.setMetadata(`chief-of-staff:email-reviewed:${messageId}`, now().toISOString());
+      return; // Deleted source mail is not a recoverable mailbox outage.
+    }
     if (message.labelIds && !message.labelIds.includes("INBOX")) return;
     const sourceId = message.id ?? messageId;
     const reviewedKey = `chief-of-staff:email-reviewed:${sourceId}`;
@@ -187,6 +236,10 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
       return;
     }
     if (isBulkMail(message)) {
+      deps.ledger.setMetadata(reviewedKey, now().toISOString());
+      return;
+    }
+    if (!freshEmail(message, now())) {
       deps.ledger.setMetadata(reviewedKey, now().toISOString());
       return;
     }
@@ -205,32 +258,53 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     if (existing.every(({ proposal }) => Boolean(proposal))) {
       if (options.interrupt) {
         for (const { ownerSpaceId, proposal } of existing) {
-          if (proposal) await deliverBriefing(ownerSpaceId, interruptProposals(ownerSpaceId, proposal), `gmail:${messageId}:${ownerSpaceId}`);
+          const key = `gmail:${messageId}:${ownerSpaceId}`;
+          if (proposal && deps.ledger.briefing(key)) await deliverBriefing(ownerSpaceId, [proposal], key);
         }
       }
       deps.ledger.setMetadata(reviewedKey, now().toISOString());
       return;
     }
-    const thread = message.threadId && deps.gmail.readThread ? await deps.gmail.readThread(message.threadId) : [message];
+    let thread = [message];
+    if (message.threadId && deps.gmail.readThread) {
+      try { thread = await deps.gmail.readThread(message.threadId); }
+      catch (error) {
+        if (!isMissingGoogleResource(error)) throw error;
+        deps.ledger.setMetadata(reviewedKey, now().toISOString());
+        return;
+      }
+    }
+    if (!emailStillActionable(message, thread, now())) {
+      deps.ledger.setMetadata(reviewedKey, now().toISOString());
+      return;
+    }
     const sentMatches = await deps.gmail.searchMessages(`in:sent to:${recipient}`, 5);
-    const sentContext = (await Promise.all(sentMatches.filter((item) => item.id).slice(0, 3).map((item) => deps.gmail.readMessage(item.id!))));
-    const urgent = deterministicallyUrgent(message, now(), deps.timezone);
+    const sentContext = (await Promise.all(sentMatches.filter((item) => item.id).slice(0, 3).map(async (item) => {
+      try { return await deps.gmail.readMessage(item.id!); }
+      catch (error) { if (isMissingGoogleResource(error)) return undefined; throw error; }
+    }))).filter((item): item is GmailMessage => Boolean(item));
+    const urgent = deterministicallyUrgent(message);
     const preferences = deps.ledger.preferences(now());
     const contactKey = `email_draft:contact:${recipient.toLowerCase()}`;
     if (!urgent && preferences.some((rule) => rule.key === `${contactKey}:ignored`)) {
       deps.ledger.setMetadata(reviewedKey, now().toISOString());
       return;
     }
-    const review = await deps.reviewEmail({ message, thread: thread.slice(-20), sentContext }, preferences);
     const alwaysSurface = preferences.some((rule) => rule.key === `${contactKey}:always_surface`);
     const lowPriority = preferences.some((rule) => rule.key === `${contactKey}:not_important`);
-    const outcome = review.outcome ?? (review.actionable ? "draft" : "ignore");
-    if (outcome === "ignore" || (outcome === "draft" && !review.draftBody?.trim())) {
-      deps.ledger.setMetadata(reviewedKey, now().toISOString());
-      return;
-    }
-    const subject = /^re:/i.test(message.subject ?? "") ? message.subject! : `Re: ${message.subject || "Your email"}`;
     for (const ownerSpaceId of ownerSpaces) {
+      const prior = existing.find((entry) => entry.ownerSpaceId === ownerSpaceId)?.proposal;
+      if (prior) {
+        const key = `gmail:${messageId}:${ownerSpaceId}`;
+        if (options.interrupt && deps.ledger.briefing(key)) await deliverBriefing(ownerSpaceId, [prior], key);
+        continue;
+      }
+      const review = await deps.reviewEmail({ message, thread: thread.slice(-20), sentContext }, preferences, ownerSpaceId);
+      const outcome = review.outcome ?? (review.actionable ? "draft" : "ignore");
+      if (outcome === "ignore" || (outcome === "draft" && !review.draftBody?.trim())) {
+        continue;
+      }
+      const subject = /^re:/i.test(message.subject ?? "") ? message.subject! : `Re: ${message.subject || "Your email"}`;
       const isSensitive = sensitiveEmail(message);
       const kind = outcome === "draft" ? "email_draft" : outcome === "decision" ? "email_decision" : "email_fyi";
       const proposalDetail = outcome === "draft"
@@ -249,11 +323,11 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
           ...(message.messageIdHeader ? { inReplyTo: message.messageIdHeader } : {}),
           ...(message.references || message.messageIdHeader ? { references: [message.references, message.messageIdHeader].filter(Boolean).join(" ") } : {}),
         } : { messageId: message.id, threadId: message.threadId },
-        evidence: { sourceType: "gmail", sourceId, contact: recipient, category: `email-${outcome}`, ruleIds: preferences.map((rule) => rule.key).slice(0, 20), rationale: review.rationale, confidence: Math.max(0, Math.min(1, review.confidence)) },
+        evidence: { sourceType: "gmail", sourceId, contact: recipient, category: `email-${outcome}`, ruleIds: preferences.map((rule) => rule.key).slice(0, 20), rationale: review.rationale, confidence: Math.max(0, Math.min(1, review.confidence)), priority: lowPriority ? "low" : alwaysSurface || urgent ? "high" : review.priority ?? "normal", ...(review.deadlineAt ? { deadlineAt: review.deadlineAt } : {}) },
         expiresAt: new Date(now().getTime() + 7 * 86_400_000).toISOString(),
       }, now());
       if (options.interrupt && (urgent || alwaysSurface || (review.interrupt && !lowPriority))) {
-        await deliverBriefing(ownerSpaceId, interruptProposals(ownerSpaceId, proposal), `gmail:${messageId}:${ownerSpaceId}`);
+        await deliverBriefing(ownerSpaceId, [proposal], `gmail:${messageId}:${ownerSpaceId}`);
       }
     }
     deps.ledger.setMetadata(reviewedKey, now().toISOString());
@@ -264,9 +338,11 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     await reviewEmailCandidate(messageId, { interrupt: true });
   }
 
-  async function runDailyReview(input: { date: string; reviewKey: string }): Promise<void> {
+  async function runDailyReview(input: { date: string; reviewKey: string; scheduledAt?: number }): Promise<void> {
+    const canDeliver = () => input.scheduledAt === undefined || dueDailyReview(now().getTime(), deps.timezone)?.date === input.date;
+    if (!canDeliver()) return;
     const ownerSpaces = await deps.ownerSpaces();
-    const pendingSpaces = ownerSpaces.filter((spaceId) => deps.ledger.briefing(`${input.reviewKey}:${spaceId}`)?.status !== "delivered");
+    const pendingSpaces = ownerSpaces.filter((spaceId) => !["delivered", "delivery_unknown"].includes(deps.ledger.briefing(`${input.reviewKey}:${spaceId}`)?.status ?? "pending"));
     if (pendingSpaces.length === 0) return;
     const start = new Date(zonedTimestamp(input.date, 0, deps.timezone));
     const [year, month, day] = input.date.split("-").map(Number) as [number, number, number];
@@ -275,12 +351,13 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     const end = new Date(zonedTimestamp(nextDate.toISOString().slice(0, 10), 0, deps.timezone));
     const events = await deps.calendar.listEvents({ timeMin: start.toISOString(), timeMax: end.toISOString() });
     if (events.length > 100) throw new Error("Today's calendar has too many events for a safe complete reshuffle.");
-    const recent = await deps.gmail.searchMessages("in:inbox is:unread newer_than:7d", 20);
+    const recent = await deps.gmail.searchMessages("in:inbox is:unread newer_than:1d", 20);
     for (const message of recent) if (message.id) await reviewEmailCandidate(message.id, { interrupt: false });
     for (const ownerSpaceId of pendingSpaces) {
       if (deps.reviewCalendar) {
-        const plan = await deps.reviewCalendar(calendarEvidence(events), deps.ledger.preferences(now()), input.date, deps.planning);
-        if (plan?.moves.length) {
+        try {
+          const plan = await deps.reviewCalendar(calendarEvidence(events), deps.ledger.preferences(now()), input.date, deps.planning, ownerSpaceId);
+          if (plan?.moves.length) {
           const snapshots = new Map(events.filter((event): event is typeof event & { id: string } => Boolean((event as { id?: string }).id)).map((event) => [(event as { id: string }).id, event as { etag?: string; updated?: string; summary?: string; start?: unknown; end?: unknown; recurringEventId?: string; organizer?: { self?: boolean }; attendees?: Array<{ self?: boolean }> }]));
           for (const move of plan.moves) {
             const source = snapshots.get(move.eventId);
@@ -300,16 +377,25 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
             return `${source.summary ?? move.eventId}: ${conciseEventTime(source.start, deps.timezone)}-${conciseEventTime(source.end, deps.timezone)} → ${conciseTimestamp(move.newStart, deps.timezone)}-${conciseTimestamp(move.newEnd, deps.timezone)}`;
           }).join("\n");
           const sensitivePlan = plan.moves.some((move) => /\b(medical|health|therapy|bank|legal|lawyer|salary|payroll)\b/i.test(snapshots.get(move.eventId)?.summary ?? ""));
-          deps.ledger.create({
+            deps.ledger.create({
             ownerSpaceId, kind: "calendar_move", sourceKey: `calendar:${input.date}`,
             summary: sensitivePlan ? "Sensitive calendar plan needs your review" : plan.summary, detail: exactDetail,
             payload: { timezone: deps.timezone, bufferMinutes: deps.planning.bufferMinutes, moves: plan.moves.map((move) => ({ ...move, expectedEtag: snapshots.get(move.eventId)?.etag, expectedUpdated: snapshots.get(move.eventId)?.updated })) },
             evidence: { sourceType: "calendar", sourceId: input.date, category: "same-day-reshuffle", ruleIds: deps.ledger.preferences(now()).map((rule) => rule.key).slice(0, 20), rationale: sensitivePlan ? "A private scheduling conflict needs a decision." : plan.rationale, confidence: plan.confidence },
             expiresAt: end.toISOString(),
-          }, now());
+            }, now());
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          // A bad model plan is safely discarded. The email portion of the
+          // briefing still goes out, which marks this daily window complete
+          // instead of making the scheduler call Calendar and the model again
+          // every minute until the catch-up window ends.
+          if (!message.startsWith("The calendar planner")) throw error;
+          console.warn("Discarded unsafe calendar plan:", message);
         }
       }
-      await deliverBriefing(ownerSpaceId, deps.ledger.listOpen(ownerSpaceId, now(), 5, deps.timezone), `${input.reviewKey}:${ownerSpaceId}`);
+      await deliverBriefing(ownerSpaceId, deps.ledger.briefingCandidates(ownerSpaceId, now(), 30, deps.timezone), `${input.reviewKey}:${ownerSpaceId}`, canDeliver);
     }
   }
 

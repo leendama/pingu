@@ -16,6 +16,7 @@ export interface ToolRunContext {
   sendVoice: (text: string) => Promise<void>;
   richResponseSent: boolean;
   draftForReview?: string;
+  draftPreview?: DraftPreview;
   confirmedEmailDraftId?: string;
   /** Key of the pending destructive action the user confirmed with this message, such as `delete_event:evt-1`. */
   confirmedActionKey?: string;
@@ -32,13 +33,26 @@ export type ToolAudience = Pick<ToolRunContext, "role" | "isGroup">;
 export interface PluginRunResult {
   output: string;
   delivered?: boolean;
+  /** @deprecated Return draftPreview with the complete review content instead. */
   draftCreated?: string;
+  draftPreview?: DraftPreview;
+}
+
+/** Self-contained review data; never requires a pending-send store or send confirmation. */
+export interface DraftPreview {
+  draftId: string;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
 }
 
 /** Clear per-attempt delivery outputs before a replay, so a stale draft or rich response cannot leak into the retry. */
-export function resetAttemptOutputs(context: Pick<ToolRunContext, "richResponseSent" | "draftForReview">): void {
+export function resetAttemptOutputs(context: Pick<ToolRunContext, "richResponseSent" | "draftForReview" | "draftPreview">): void {
   context.richResponseSent = false;
   context.draftForReview = undefined;
+  context.draftPreview = undefined;
 }
 
 export interface AssistantPlugin {
@@ -169,7 +183,14 @@ export class PluginRegistry {
       const result = await plugin.run(name, argumentsJson, context);
       if (policy.untrustedSource) context.untrustedContentSeen = true;
       if (result.delivered) context.richResponseSent = true;
-      if (result.draftCreated) context.draftForReview = result.draftCreated;
+      if (result.draftCreated) {
+        context.draftForReview = result.draftCreated;
+        context.draftPreview = undefined;
+      }
+      if (result.draftPreview) {
+        context.draftPreview = result.draftPreview;
+        context.draftForReview = undefined;
+      }
       return { handled: true, output: result.output };
     } catch (error) {
       return { handled: true, output: JSON.stringify({ error: error instanceof Error ? error.message : "Plugin tool failed." }) };

@@ -45,3 +45,13 @@ New tools start as private and side-effecting. A private tool exists only in the
 `context.role` is `"owner"` or `"guest"`, `context.senderId` is the sender id Spectrum reported (undefined when it recorded none), and `context.isGroup` says whether the chat is a group. Use `context.untrustedContentSeen` and `context.confirmedActionKey` if your tool does something destructive: arm a confirmation with `armPendingAction` and act only when the key comes back on the next message.
 
 Plugins run as trusted server code. Check the source and dependencies before installing one.
+
+## Draft results and compatibility
+
+Email tools create drafts for manual review and sending in Gmail. There is no `send_gmail_draft` or `review_gmail_draft` tool. Do not instruct the assistant to ask for send confirmation.
+
+Prefer delegating to `gmailPlugin(port).run("create_gmail_draft", argumentsJson, context)`. It verifies the draft where the port supports read-back and returns a self-contained `draftPreview` containing `draftId`, `to`, `cc`, `bcc`, `subject` and `body`. The registry passes that preview to the message pipeline, which displays it without a pending-email store. A plugin must return preview data only after successful draft creation.
+
+The older `draftCreated` result is deprecated. If a compatible pending lookup exists, its matching preview can still be displayed. If the lookup is missing, unavailable or points to a different draft, Pingu reports that a draft was created and directs the owner to Gmail. It does not recreate the draft or pretend that creation failed. Legacy confirmation fields and stores are compatibility APIs; the production agent does not wire an email-send confirmation flow.
+
+Integration tests should use the real registry and message pipeline with fake external services, including the production configuration without optional legacy dependencies. Testing a plugin only with a mocked pending store misses this compatibility failure.

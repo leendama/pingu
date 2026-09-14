@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Message, Space } from "spectrum-ts";
 import type { PendingEmail } from "./pending-emails.js";
+import { PluginRegistry, type AssistantPlugin } from "./plugins.js";
+import { gmailPlugin, type GmailPort } from "./capabilities/gmail.js";
 import { combineInboundMessages, createMessageProcessor, inboundSenderId, senderRuns, spaceKind } from "./message-pipeline.js";
 
 const pending: PendingEmail = {
@@ -82,6 +84,45 @@ function dependencies() {
 }
 
 describe("message pipeline", () => {
+  it("delivers a built-in Gmail draft through the registry without legacy runtime dependencies", async () => {
+    const createDraft = vi.fn(async () => "draft-new");
+    const registry = new PluginRegistry([gmailPlugin({ createDraft } as unknown as GmailPort)]);
+    const send = vi.fn(async () => undefined);
+    const { getPendingEmail, markEmailReviewed, consumeEmailConfirmation, ...deps } = dependencies();
+    deps.generateReply = vi.fn(async (_spaceId, _text, context) => {
+      await registry.run("create_gmail_draft", JSON.stringify({ to: ["friend@example.com"], cc: [], bcc: [], subject: "Hello", body: "Complete review text" }), context);
+      return "Incomplete model summary";
+    });
+    await createMessageProcessor(deps)(directSpace(send), inboundMessage());
+    expect(createDraft).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledOnce();
+    const text = await sentContentText(send, 0);
+    expect(text).toContain("Complete review text");
+    expect(text).toContain("friend@example.com");
+    expect(text).toContain("send manually");
+    expect(text).not.toContain("Incomplete model summary");
+  });
+
+  it.each(["absent", "mismatch", "unavailable"])("preserves a legacy plugin's successful draft when its preview lookup is %s", async (mode) => {
+    const plugin: AssistantPlugin = {
+      id: "legacy-draft", name: "Legacy draft", tools: [{ type: "function", name: "legacy_draft", parameters: { type: "object", properties: {} }, strict: false }],
+      run: vi.fn(async () => ({ draftCreated: "legacy-1", output: '{"created":true}' })),
+    };
+    const registry = new PluginRegistry([plugin]);
+    const send = vi.fn(async () => undefined);
+    const { getPendingEmail, consumeEmailConfirmation, ...deps } = dependencies();
+    deps.generateReply = vi.fn(async (_spaceId, _text, context) => {
+      await registry.run("legacy_draft", "{}", context);
+      return "model reply";
+    });
+    await createMessageProcessor({ ...deps, ...(mode === "absent" ? {} : { getPendingEmail: async () => { if (mode === "unavailable") throw new Error("lookup failed"); return pending; } }) })(directSpace(send), inboundMessage());
+    expect(plugin.run).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledOnce();
+    expect(await sentContentText(send, 0)).toContain("a Gmail draft was created");
+    expect(await sentContentText(send, 0)).not.toContain("failed after");
+    expect(deps.markEmailReviewed).not.toHaveBeenCalled();
+  });
+
   it("arms email confirmation only after the canonical draft is delivered", async () => {
     const deps = dependencies();
     const send = vi.fn(async () => undefined);

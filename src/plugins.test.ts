@@ -75,9 +75,11 @@ describe("PluginRegistry", () => {
     const attempt = context(false);
     attempt.richResponseSent = true;
     attempt.draftForReview = "draft-1";
+    attempt.draftPreview = { draftId: "draft-2", to: [], cc: [], bcc: [], subject: "Test", body: "Test" };
     resetAttemptOutputs(attempt);
     expect(attempt.richResponseSent).toBe(false);
     expect(attempt.draftForReview).toBeUndefined();
+    expect(attempt.draftPreview).toBeUndefined();
   });
 
   it("keeps owner-only tools from guests in any chat while leaving them group-safe for the owner", () => {

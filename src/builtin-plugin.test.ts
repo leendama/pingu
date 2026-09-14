@@ -15,6 +15,14 @@ describe("built-in plugin policy", () => {
     expect(registry.tools.length).toBeGreaterThan(20);
   });
 
+  it("keeps built-in instruction tool references aligned with the registered tools", () => {
+    const names = new Set(registry.tools.map((tool) => tool.type === "function" ? tool.name : ""));
+    const identifiers = plugins.flatMap((plugin) => plugin.instructions ?? []).join("\n").match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? [];
+    expect(identifiers.filter((name) => !names.has(name))).toEqual([]);
+    expect(names.has("send_gmail_draft")).toBe(false);
+    expect(names.has("review_gmail_draft")).toBe(false);
+  });
+
   it("blocks private built-ins in group chats", async () => {
     const result = await registry.run("search_calendar", "{}", context(true));
     expect(result.handled && JSON.parse(result.output).error).toMatch(/private/);

@@ -301,6 +301,7 @@ export function gmailPlugin(port: GmailPort, _legacyPendingEmails?: PendingEmail
           const body = appendPinguSignature(rawBody);
           const draftId = await createVerifiedGmailDraft(port, { to: stringArray(args.to), cc: stringArray(args.cc), bcc: stringArray(args.bcc), subject: stringValue(args.subject) ?? "", body: rawBody });
           return {
+            draftPreview: { draftId, to: stringArray(args.to), cc: stringArray(args.cc), bcc: stringArray(args.bcc), subject: stringValue(args.subject) ?? "", body },
             output: JSON.stringify({
               created: true,
               draft_id: draftId,

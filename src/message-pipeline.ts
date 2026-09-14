@@ -45,7 +45,7 @@ export interface MessagePipelineDependencies {
   onReplyDelivered?: () => void;
 }
 
-export function formatEmailDraft(email: PendingEmail): string {
+export function formatEmailDraft(email: Pick<PendingEmail, "to" | "cc" | "bcc" | "subject" | "body">): string {
   return [
     "Here’s the full draft:",
     "",
@@ -294,18 +294,24 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       clearTimeout(progressTimer);
       const progressMessage = progressPromise ? await progressPromise : undefined;
 
-      if (context.richResponseSent && !context.draftForReview) {
+      if (context.richResponseSent && !context.draftForReview && !context.draftPreview) {
         if (progressMessage) await progressMessage.unsend().catch(() => undefined);
         dependencies.onReplyDelivered?.();
         return;
       }
 
-      if (context.draftForReview) {
-        const pending = await dependencies.getPendingEmail?.(space.id);
-        if (!pending || pending.draftId !== context.draftForReview) {
-          throw new Error("The email draft selected for review is no longer pending.");
+      if (context.draftPreview) {
+        reply = formatEmailDraft(context.draftPreview);
+      } else if (context.draftForReview) {
+        // Old plugins may create a draft successfully without a usable pending
+        // store. Missing preview data must not become a false action failure.
+        const pending = await dependencies.getPendingEmail?.(space.id).catch(() => undefined);
+        if (pending?.draftId === context.draftForReview) {
+          reply = formatEmailDraft(pending);
+        } else {
+          reply = "a Gmail draft was created, but i couldn't load its preview. check Gmail to review and send it; don't create another copy.";
+          context.draftForReview = undefined;
         }
-        reply = formatEmailDraft(pending);
       }
 
       if (progressMessage) {

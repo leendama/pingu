@@ -41,7 +41,7 @@ export async function markPendingEmailReviewed(spaceId: string, draftId: string)
   });
 }
 
-/** Abandoned drafts are dropped this long after creation; until then review_gmail_draft can re-arm them. */
+/** Legacy pending-review records expire after this interval. Current drafts are reviewed and sent in Gmail. */
 export const PENDING_EMAIL_TTL_MS = 24 * 60 * 60 * 1000;
 
 export async function consumePendingEmailConfirmation(

@@ -40,3 +40,14 @@ These are source-level comparisons, not comparative model benchmarks. Upstream m
 Added deterministic tests for local/UTC date disagreement, midnight refresh, daylight saving, configured clock timezone, historical-clock projection, past calendar creation on the exact date, and full-date conflict evidence. Existing suites cover verified calendar writes, move rollback, transcript continuity and chief-of-staff freshness.
 
 No new dependencies or model parameters are required. The local working branch diverges from origin/main (8 upstream-only and 11 local-only commits at review time) and contains ongoing changes. Upstream was fetched and inspected; no merge, reset or publication was performed. Private style configuration is not part of the public diff.
+
+
+## Follow-up: plugin/runtime contract audit
+
+The follow-up audit found one shared compatibility defect: the registry accepted legacy `draftCreated` results, while the production message pipeline had no pending-email lookup. Tests supplied that optional dependency and missed the production failure. This affected any older draft plugin using that contract, not just one shortcut.
+
+Fixed: built-in Gmail results now carry a typed, self-contained `draftPreview` through the registry to the message pipeline. The pipeline renders recipients, subject and complete body without a pending store. Older plugins receive a truthful Gmail review notice when their preview lookup is absent, fails or returns a different draft. No draft creation is replayed. Attempt resets clear both current and legacy preview state.
+
+Audit coverage: public source, plugin documentation, default built-in tool metadata and instruction references, optional scheduling/workflow wiring, rich-message delivery handlers, and installed private plugin references. Default built-ins registered 30 tools across eight plugins; their policy references and instruction tool identifiers all resolved. Scheduling's owner-reply handler and voice synthesis are wired in the agent. Workflows use their registered ledger and approved tool list. No second instance of this missing-consumer mismatch was identified in those paths. Compatibility storage remains available to older integrations; it does not enable automatic email sending.
+
+New integration cases exercise the actual Gmail plugin, registry and message pipeline with fake external services and no legacy dependencies, plus three legacy-lookup failure modes. They verify one creation, one review response, full preview content for current plugins, and no false creation failure or email-send confirmation for fallback cases. The audit did not send messages or create live drafts.

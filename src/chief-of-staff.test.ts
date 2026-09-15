@@ -41,6 +41,20 @@ async function setup() {
 }
 
 describe("chief of staff service", () => {
+  it.each(["ignore", "fyi", "draft", "decision"] as const)("records only actionable %s outcomes as reply obligations", async (outcome) => {
+    const { ledger, calendar } = await setup();
+    const trackEmail = vi.fn();
+    const service = createChiefOfStaff({
+      gmail: { readMessage: async () => ({ id: "incoming", from: "Person <person@example.test>", subject: "Report", body: "Can you review this?" }), searchMessages: async () => [] } as unknown as GmailPort,
+      calendar, ledger, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 0, minimumNoticeHours: 0 },
+      ownerSpaces: async () => ["owner"], deliver: vi.fn(), trackEmail,
+      reviewEmail: async () => ({ outcome, confidence: 0.95, interrupt: false, summary: "Review the report", rationale: "Question", draftBody: outcome === "draft" ? "Thanks" : undefined }),
+    });
+    await service.reviewIncomingEmail("incoming");
+    await service.reviewIncomingEmail("incoming");
+    expect(trackEmail).toHaveBeenCalledTimes(outcome === "draft" || outcome === "decision" ? 1 : 0);
+    ledger.close();
+  });
   it("ignores automatic replies before they reach the reviewer", async () => {
     const { ledger, delivered } = await setup();
     const reviewEmail = vi.fn();

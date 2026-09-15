@@ -33,7 +33,7 @@ function statusError(status: number): Error & { status: number } {
 }
 
 function freshContext(): ToolRunContext {
-  return { spaceId: "chat", isGroup: false, role: "owner", richResponseSent: false, sideEffectAttempted: false, untrustedContentSeen: false } as ToolRunContext;
+  return { config: { timezone: "UTC" }, spaceId: "chat", isGroup: false, role: "owner", richResponseSent: false, sideEffectAttempted: false, untrustedContentSeen: false } as ToolRunContext;
 }
 
 function makeGenerator(respondScript: Array<Response | Error>, overrides: Record<string, unknown> = {}, history: ResponseInputItem[] = []) {
@@ -126,14 +126,42 @@ describe("createReplyGenerator", () => {
     expect(transcripts.forget).not.toHaveBeenCalled();
   });
 
-  it("never retries after a side effect was attempted and leaves the transcript untouched", async () => {
+  it("never retries after a side effect was attempted and records the failed request", async () => {
     const { generate, respond, transcripts } = makeGenerator([statusError(404)]);
     const context = freshContext();
     context.sideEffectAttempted = true;
     await expect(generate("chat", "hello", context)).rejects.toThrow("model failure 404");
     expect(respond).toHaveBeenCalledTimes(1);
     expect(transcripts.forget).not.toHaveBeenCalled();
-    expect(transcripts.append).not.toHaveBeenCalled();
+    expect(transcripts.append).toHaveBeenCalledOnce();
+    expect(transcripts.append.mock.calls[0]?.[1]).toEqual([
+      { type: "message", role: "user", content: "hello" },
+      expect.objectContaining({ role: "assistant", content: expect.stringContaining("Runtime record") }),
+    ]);
+  });
+
+  it("keeps the verified tool result when the model fails after a write", async () => {
+    const { generate, respond, transcripts } = makeGenerator([toolCallResponse("create_calendar_event"), statusError(500)], {
+      runTool: async (_n: string, _a: string, c: ToolRunContext) => { c.sideEffectAttempted = true; return { handled: true, output: '{"id":"event-123","verified":true}' }; },
+    });
+    await expect(generate("chat", "book reading", freshContext())).rejects.toThrow();
+    expect(respond).toHaveBeenCalledTimes(2);
+    expect(transcripts.append.mock.calls[0]?.[1]).toEqual([
+      expect.objectContaining({ role: "user" }),
+      expect.objectContaining({ type: "function_call", name: "create_calendar_event" }),
+      expect.objectContaining({ type: "function_call_output", output: expect.stringContaining("event-123") }),
+      expect.objectContaining({ role: "assistant", content: expect.stringContaining("Do not invent a cause") }),
+    ]);
+  });
+
+  it("does not retain unexecuted calls when an invocation throws", async () => {
+    const response = toolCallResponse("first");
+    response.output.push({ type: "function_call", call_id: "unrun", name: "second", arguments: "{}" });
+    const { generate, transcripts } = makeGenerator([response], { runTool: async () => { throw new Error("transport failed"); } });
+    await expect(generate("chat", "do it", freshContext())).rejects.toThrow();
+    const saved = JSON.stringify(transcripts.append.mock.calls[0]?.[1]);
+    expect(saved).toContain("outcome is unknown");
+    expect(saved).not.toContain("unrun");
   });
 
   it("clears draftForReview and richResponseSent from the failed attempt before replaying", async () => {

@@ -62,3 +62,12 @@ In actionable mode, new reply requests and owner decisions notify during the nex
 Immediate notifications contain the sender and a short TLDR, without approval boilerplate. Raw sender-watch notices are suppressed while actionable mode and chief-of-staff scanning are enabled, so they cannot bypass acknowledgement filtering or duplicate TLDRs. Gmail history retains its durable retry handling. Existing source freshness checks, thread revalidation and delivery deduplication remain active. The Gmail Updates category alone is no longer treated as proof of bulk mail; bulk headers and promotional classification still apply.
 
 Offline regression cases cover normal-priority outreach replies, new personal asks, Updates-labelled requests, overnight delivery, repeated ingestion, owner decisions, acknowledgement/FYI suppression, uncertain classifications and unchanged default behaviour. Previously reviewed messages are not replayed when the policy is enabled.
+
+
+## Calendar display timezone correction
+
+Google can return an offset-bearing timestamp alongside different event timezone metadata. For example, `2029-01-17T17:00:00+09:00` with `timeZone: UTC` denotes 17:00 in Tokyo, not 17:00 UTC. The former tool result exposed both fields without a canonical local presentation, leaving the model to interpret and convert them. The prior live-clock fix did not address this event-display ambiguity.
+
+Calendar tool results now normalize event start/end to the configured timezone and provide a display schedule containing the full date, weekday and local time. Explicit timestamp offsets take precedence over separate timezone metadata. Real UTC instants are converted once; all-day dates retain their exclusive-end semantics. Normalization is idempotent and does not mutate stored events. Historical calendar tool results receive the same projection without rewriting transcripts, and chief-of-staff calendar reviews receive normalized events. Presentation errors preserve action results and explicitly prohibit guessing.
+
+Regression coverage includes conflicting timezone metadata through both search and read tools, real UTC conversion with date rollover, seasonal offsets, all-day boundaries, invalid timestamps and historical result projection. Read-only inspection of the reported live events confirmed their expected evening times after normalization. No calendar entries were changed.

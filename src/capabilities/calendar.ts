@@ -435,6 +435,48 @@ export function searchSummary(event: CalendarEventData): Omit<CalendarEventData,
   return rest;
 }
 
+/** Model presentation only. An explicit RFC3339 offset defines the instant,
+ * even when Google's event timeZone metadata names another zone. */
+export function presentCalendarEvent(event: CalendarEventData, timezone: string) {
+  const present = (value: unknown) => {
+    const time = eventTime(value);
+    if (time?.date && !time.dateTime) return { value, label: time.date, allDay: true };
+    if (!time?.dateTime) return { value, label: "time unavailable" };
+    const ms = calendarTimestamp(time.dateTime, { timezone: time.timeZone ?? timezone, allDayTimezone: timezone });
+    if (!Number.isFinite(ms)) throw new Error("Invalid event timestamp");
+    const date = new Date(ms);
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZoneName: "longOffset",
+    }).formatToParts(date).map((part) => [part.type, part.value]));
+    const offset = parts.timeZoneName!.replace("GMT", "") || "+00:00";
+    const fraction = date.getUTCMilliseconds() ? `.${String(date.getUTCMilliseconds()).padStart(3, "0")}` : "";
+    return {
+      value: { dateTime: `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${fraction}${offset}`, timeZone: timezone },
+      label: new Intl.DateTimeFormat("en-AU", { timeZone: timezone, weekday: "long", year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(date),
+    };
+  };
+  try {
+    const start = present(event.start);
+    const end = present(event.end);
+    return { ...event, start: start.value, end: end.value, display_schedule: { timezone, start: start.label, end: end.label, ...(start.allDay ? { all_day: true, end_date_exclusive: true } : {}) } };
+  } catch {
+    // A presentation problem must not turn a successful write into a reported
+    // action failure, or invite the model to invent a corrected time.
+    return { ...event, display_schedule: { timezone, error: "Cannot resolve event times. Do not guess or convert them manually." } };
+  }
+}
+
+export function presentCalendarOutput(output: string, timezone: string): string {
+  try {
+    const data = JSON.parse(output) as Record<string, unknown>;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return output;
+    if (Array.isArray(data.events)) data.events = data.events.map((event) => presentCalendarEvent(event as CalendarEventData, timezone));
+    if (data.event && typeof data.event === "object") data.event = presentCalendarEvent(data.event as CalendarEventData, timezone);
+    return JSON.stringify(data);
+  } catch { return output; }
+}
+
 /** Shared verified move path for both model tools and approval-ledger execution. */
 export async function applyVerifiedCalendarMovePlan(
   port: CalendarPort,
@@ -469,12 +511,12 @@ export async function applyVerifiedCalendarMovePlan(
 }
 
 export function calendarPlugin(port: CalendarPort): PinguPlugin {
-  return capabilityPlugin(
+  const plugin = capabilityPlugin(
     {
       id: "calendar",
       name: "Google Calendar",
       description: "Search, create, move, recolour, edit, and delete events.",
-      instructions: ["search_calendar omits event descriptions. Call read_calendar_event when the description or invitation text matters."],
+      instructions: ["search_calendar omits event descriptions. Call read_calendar_event when the description or invitation text matters.", "Calendar event display schedules and start/end are already normalized to the configured display timezone. Use the display schedule for dates, weekdays and times; do not convert it again. An explicit offset in a timestamp defines the instant, not a separate event timeZone metadata label. On a timezone correction, re-read the event or search the window before answering. Never merely agree with a correction or change an event to repair your own display error."],
     },
     [
       {
@@ -883,4 +925,11 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
       },
     ],
   );
+  return {
+    ...plugin,
+    async run(name, argumentsJson, context) {
+      const result = await plugin.run(name, argumentsJson, context);
+      return { ...result, output: presentCalendarOutput(result.output, context.config.timezone) };
+    },
+  };
 }

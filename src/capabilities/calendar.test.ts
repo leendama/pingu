@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getPendingAction } from "../pending-confirmations.js";
 import type { ToolRunContext } from "../plugins.js";
-import { calendarPlugin, calendarRecurrence, deleteConfirmationReason, eventMismatches, type CalendarEventData, type CalendarPort } from "./calendar.js";
+import { calendarPlugin, calendarRecurrence, deleteConfirmationReason, eventMismatches, presentCalendarEvent, type CalendarEventData, type CalendarPort } from "./calendar.js";
 
 let directory: string;
 beforeAll(async () => {
@@ -59,6 +59,38 @@ function fakePort(calls: RecordedCall[], initial: CalendarEventData[] = [], cale
 const context = { isGroup: false, role: "owner", spaceId: "chat", config: { timezone: "UTC" }, untrustedContentSeen: false } as ToolRunContext;
 
 describe("calendarPlugin", () => {
+  it.each(["search_calendar", "read_calendar_event"])("normalizes conflicting timezone metadata in %s without changing the source", async (tool) => {
+    const original = { id: "talk", summary: "Evening talk", start: { dateTime: "2029-01-17T17:00:00+09:00", timeZone: "UTC" }, end: { dateTime: "2029-01-17T19:00:00+09:00", timeZone: "UTC" } };
+    const calls: RecordedCall[] = [];
+    const port = fakePort(calls, [original]);
+    const result = await calendarPlugin(port).run(tool, JSON.stringify({ event_id: "talk", time_min: "2029-01-17T00:00:00+09:00", time_max: "2029-01-18T00:00:00+09:00" }), { ...context, config: { timezone: "Asia/Tokyo" } });
+    const data = JSON.parse(result.output);
+    const event = data.event ?? data.events[0];
+    expect(event.start).toEqual({ dateTime: "2029-01-17T17:00:00+09:00", timeZone: "Asia/Tokyo" });
+    expect(event.display_schedule.start).toContain("Wednesday");
+    expect(event.display_schedule.start).toContain("5:00");
+    expect(await port.getEvent("talk")).toEqual(original);
+    expect(calls.some((call) => ["insert", "patch", "delete"].includes(call.method))).toBe(false);
+  });
+
+  it("converts a real UTC instant once, including the date rollover", () => {
+    const event = presentCalendarEvent({ start: { dateTime: "2029-01-17T17:00:00Z", timeZone: "UTC" }, end: { dateTime: "2029-01-17T19:00:00Z" } }, "Asia/Tokyo");
+    expect(event.start).toEqual({ dateTime: "2029-01-18T02:00:00+09:00", timeZone: "Asia/Tokyo" });
+    expect(event.display_schedule).toMatchObject({ start: expect.stringContaining("Thursday") });
+    expect(presentCalendarEvent(event, "Asia/Tokyo")).toEqual(event);
+  });
+
+  it("uses the event date's daylight-saving offset, preserves all-day boundaries and reports invalid times", () => {
+    const summer = presentCalendarEvent({ start: { dateTime: "2029-07-01T17:00:00Z" } }, "America/New_York");
+    const winter = presentCalendarEvent({ start: { dateTime: "2029-01-01T17:00:00Z" } }, "America/New_York");
+    expect(summer.start).toEqual({ dateTime: "2029-07-01T13:00:00-04:00", timeZone: "America/New_York" });
+    expect(winter.start).toEqual({ dateTime: "2029-01-01T12:00:00-05:00", timeZone: "America/New_York" });
+    const allDay = presentCalendarEvent({ start: { date: "2029-01-17" }, end: { date: "2029-01-18" } }, "America/New_York");
+    expect(allDay.start).toEqual({ date: "2029-01-17" });
+    expect(allDay.display_schedule).toMatchObject({ all_day: true, end_date_exclusive: true });
+    expect(presentCalendarEvent({ start: { dateTime: "invalid" } }, "UTC").display_schedule.error).toContain("Do not guess");
+  });
+
   it("records a requested past morning on its exact date, ignoring a same-time event on the previous day", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2029-03-04T03:00:00Z"));

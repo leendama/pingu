@@ -1,13 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { liveTime, temporalInstructions } from "./time-context.js";
 import { clockPlugin } from "./capabilities/clock.js";
-import { markHistoricalClocks } from "./reply-generator.js";
+import { markHistoricalClocks, presentHistoricalCalendars } from "./reply-generator.js";
 import type { ToolRunContext } from "./plugins.js";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 
 afterEach(() => vi.useRealTimers());
 
 describe("temporal context regressions", () => {
+  it("normalizes saved calendar results without rewriting the transcript", () => {
+    const output = JSON.stringify({ events: [{ start: { dateTime: "2029-01-17T17:00:00+09:00", timeZone: "UTC" } }] });
+    const history: ResponseInputItem[] = [
+      { type: "function_call", call_id: "calendar", name: "search_calendar", arguments: "{}" },
+      { type: "function_call_output", call_id: "calendar", output },
+    ];
+    const projected = presentHistoricalCalendars(history, "Asia/Tokyo");
+    expect(projected[1]).toMatchObject({ output: expect.stringContaining('"timeZone":"Asia/Tokyo"') });
+    expect(history[1]).toMatchObject({ output });
+  });
   it("uses the user's calendar date even when UTC is on the previous day", () => {
     expect(liveTime("Asia/Tokyo", new Date("2029-03-03T23:30:00Z"))).toMatchObject({ local_date: "2029-03-04", timezone: "Asia/Tokyo" });
     expect(liveTime("America/Los_Angeles", new Date("2029-03-04T01:00:00Z"))).toMatchObject({ local_date: "2029-03-03" });

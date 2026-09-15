@@ -17,6 +17,9 @@ import type { SchedulingService } from "./scheduling.js";
 import { forgetTranscript } from "./transcripts.js";
 import { workflowsPlugin } from "./capabilities/workflows.js";
 import type { ProposalLedger } from "./proposals.js";
+import { PersonalState } from "./personal-state.js";
+import { personalStatePlugin } from "./capabilities/personal-state.js";
+import { personalBrainPlugin } from "./capabilities/personal-brain.js";
 
 export interface BuiltInOptions {
   /** Register the voice tool. Only an OpenAI provider can synthesise speech. */
@@ -24,6 +27,8 @@ export interface BuiltInOptions {
   /** Guest scheduling, when the owner's calendar is connected. */
   scheduling?: SchedulingService;
   proposalLedger?: ProposalLedger;
+  personalState?: PersonalState;
+  vaultPath?: string;
 }
 
 export function builtInPlugins(
@@ -31,6 +36,7 @@ export function builtInPlugins(
   options: BuiltInOptions = {},
 ): AssistantPlugin[] {
   const gmail = googleGmailPort(settings?.google);
+  const personalState = options.personalState ?? new PersonalState();
   return [
     clockPlugin(),
     calendarPlugin(googleCalendarPort(settings?.google)),
@@ -39,7 +45,9 @@ export function builtInPlugins(
     granolaPlugin(granolaPort(settings?.granolaApiKey)),
     remindersPlugin({ create: createReminder, list: listReminders, cancel: cancelReminder, countBySender: countRemindersBySender }, { guestMaxReminders: settings?.guest?.maxReminders }),
     imessagePlugin({ voice: options.voice ?? true }),
-    privacyPlugin({ forget: forgetTranscript }),
+    personalStatePlugin(personalState),
+    ...(options.vaultPath ? [personalBrainPlugin(options.vaultPath)] : []),
+    privacyPlugin({ forget: async (spaceId) => { await forgetTranscript(spaceId); await personalState.forget(spaceId); } }),
     ...(options.proposalLedger ? [workflowsPlugin(options.proposalLedger)] : []),
     ...(options.scheduling
       ? [schedulingPlugin(options.scheduling, {

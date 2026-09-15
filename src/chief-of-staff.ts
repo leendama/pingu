@@ -43,6 +43,7 @@ export interface ChiefOfStaffDeps {
   ownerSpaces(): Promise<string[]>;
   deliver(spaceId: string, text: string): Promise<void>;
   reviewEmail(context: EmailReviewContext, preferences: PreferenceRule[], ownerSpaceId: string): Promise<EmailReview>;
+  trackEmail?(spaceId: string, message: GmailMessage, summary: string, counterparty: string): Promise<void>;
   planning: { workdayStart: string; workdayEnd: string; bufferMinutes: number; minimumNoticeHours: number };
   reviewCalendar?(events: unknown[], preferences: PreferenceRule[], date: string, planning: ChiefOfStaffDeps["planning"], ownerSpaceId: string): Promise<CalendarReview | undefined>;
   learnHistory?(input: { inbox: unknown[]; sent: unknown[]; calendar: unknown[] }): Promise<Array<Omit<PreferenceRule, "updatedAt">>>;
@@ -260,6 +261,9 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
         .find((proposal): proposal is Proposal => Boolean(proposal)),
     }));
     if (existing.every(({ proposal }) => Boolean(proposal))) {
+      for (const { ownerSpaceId, proposal } of existing) {
+        if (proposal && actionableAlert({ outcome: proposal.kind === "email_draft" ? "draft" : proposal.kind === "email_decision" ? "decision" : "fyi", confidence: proposal.evidence.confidence })) await deps.trackEmail?.(ownerSpaceId, message, proposal.summary, recipient);
+      }
       if (options.interrupt) {
         for (const { ownerSpaceId, proposal } of existing) {
           const key = `gmail:${messageId}:${ownerSpaceId}`;
@@ -307,6 +311,7 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
       }
       const review = await deps.reviewEmail({ message, thread: thread.slice(-20), sentContext, alertMode }, preferences, ownerSpaceId);
       const outcome = review.outcome ?? (review.actionable ? "draft" : "ignore");
+      if (actionableAlert({ ...review, outcome })) await deps.trackEmail?.(ownerSpaceId, message, review.summary, recipient);
       if (outcome === "ignore" || (outcome === "draft" && !review.draftBody?.trim())) {
         continue;
       }

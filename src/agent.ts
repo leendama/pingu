@@ -30,7 +30,9 @@ import { startGmailHistoryScheduler } from "./gmail-history.js";
 import { startPoller } from "./poller.js";
 import { handleChiefInterview, operatingBriefText } from "./chief-interview.js";
 import { temporalInstructions } from "./time-context.js";
+import { PersonalState } from "./personal-state.js";
 import { emailAlertMode } from "./email-alert-policy.js";
+import { presentCalendarEvent, type CalendarEventData } from "./capabilities/calendar.js";
 
 export function agentInstructions(settings: RuntimeSettings, pluginInstructions: string[]): string {
   return [
@@ -146,9 +148,12 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const calendar = googleCalendarPort(settings.google);
   const gmail = googleGmailPort(settings.google);
   const proposalLedger = new ProposalLedger();
+  const personalState = new PersonalState();
   const legacyProposals = proposalLedger.invalidateLegacyEmailReplyProposals();
   if (legacyProposals) console.log("Invalidated legacy email proposals after the outcome-classification upgrade:", legacyProposals);
-  const stopOwnerRemoval = onOwnerRemoved((owner) => { if (owner.spaceId) proposalLedger.invalidateOwnerSpace(owner.spaceId); });
+  const stopOwnerRemoval = onOwnerRemoved(async (owner) => {
+    if (owner.spaceId) { proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); }
+  });
   const structuredReviewer = {
     call: async (prompt: string, tool: import("openai/resources/responses/responses").Tool): Promise<Record<string, unknown>> => {
       const response = await client.responses.create({
@@ -180,9 +185,10 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     timezone: settings.timezone,
     planning: { workdayStart: settings.chiefOfStaff.workdayStart, workdayEnd: settings.chiefOfStaff.workdayEnd, bufferMinutes: settings.chiefOfStaff.bufferMinutes, minimumNoticeHours: settings.chiefOfStaff.minimumNoticeHours },
     ownerSpaces: ownerSpaceIds,
+    trackEmail: (spaceId, message, summary, counterparty) => personalState.trackEmail(spaceId, message, summary, counterparty),
     deliver: (spaceId, text) => deliverToOwner(proactive, spaceId, text),
     reviewEmail: (message, preferences, ownerSpaceId) => reviewEmailWithModel(structuredReviewer, message, preferences, operatingBriefText(proposalLedger, ownerSpaceId), { now: new Date().toISOString(), timezone: settings.timezone }),
-    reviewCalendar: (events, preferences, date, planning, ownerSpaceId) => reviewCalendarWithModel(structuredReviewer, events, preferences, date, planning, operatingBriefText(proposalLedger, ownerSpaceId)),
+    reviewCalendar: (events, preferences, date, planning, ownerSpaceId) => reviewCalendarWithModel(structuredReviewer, events.map((event) => presentCalendarEvent(event as CalendarEventData, settings.timezone)), preferences, date, planning, operatingBriefText(proposalLedger, ownerSpaceId)),
     learnHistory: (input) => learnHistoryWithModel(structuredReviewer, input),
   });
   const reportChiefFailure = async (key: string, text: string): Promise<void> => {
@@ -229,15 +235,15 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   });
 
   const registry = new PluginRegistry([
-    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger }),
+    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH }),
     ...await loadCommunityPlugins(),
   ]);
   const instructions = agentInstructions(settings, registry.instructions);
 
   const generateReply = createReplyGenerator({
-    respond: (input, context) => client.responses.create({
+    respond: async (input, context) => client.responses.create({
       model: settings.model,
-      instructions: `${instructions}\n${turnInstructions(settings, context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}\n${temporalInstructions(settings.timezone)}`,
+      instructions: `${instructions}\n${turnInstructions(settings, context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}${context.role === "owner" && !context.isGroup ? await personalState.context(context.spaceId) : ""}\n${temporalInstructions(settings.timezone)}`,
       input,
       tools: registry.toolsFor(context),
       ...(context.role === "guest" ? { max_output_tokens: settings.guest.maxOutputTokens } : {}),
@@ -251,7 +257,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       forget: forgetTranscript,
     },
     keepReasoning: kind === "openai",
-    maxToolRounds: (context) => context.role === "guest" ? settings.guest.maxToolRounds : 6,
+    maxToolRounds: (context) => context.role === "guest" ? settings.guest.maxToolRounds : context.workflowAllowedTools ? 10 : 6,
     turnTokenBudget: (context) => context.role === "guest" ? settings.guest.maxTurnTokens : undefined,
     runTool: (name, argumentsJson, context) => registry.run(name, argumentsJson, context),
     onUsage: (usage, context) => context.role === "guest" ? recordGuestUsage(usage.totalTokens) : undefined,
@@ -279,6 +285,10 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const stopScheduling = scheduling.startExpiryPoller();
   const stopTranscriptCleanup = startTranscriptCleanup(settings.transcripts);
   const stopProposalCleanup = startProposalCleanup(proposalLedger, settings.transcripts.retentionDays);
+  const stopCommitmentReconciliation = settings.chiefOfStaff.enabled
+    ? startPoller("Commitment reconciliation", 60_000, async () => {
+        for (const spaceId of await ownerSpaceIds()) await personalState.reconcile(gmail, spaceId);
+      }) : () => undefined;
   const stopChiefGmail = settings.chiefOfStaff.enabled
     ? startGmailHistoryScheduler(gmail, proposalLedger, async (messageId) => {
         try {
@@ -380,6 +390,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       stopScheduling();
       stopTranscriptCleanup();
       stopProposalCleanup();
+      stopCommitmentReconciliation();
       stopChiefGmail();
       stopChiefDaily();
       stopOwnerRemoval();
@@ -399,6 +410,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       stopScheduling();
       stopTranscriptCleanup();
       stopProposalCleanup();
+      stopCommitmentReconciliation();
       stopChiefGmail();
       stopChiefDaily();
       stopInterruptedApprovals();

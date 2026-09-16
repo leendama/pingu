@@ -383,10 +383,13 @@ async function validateMovePlan(
 
 async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], duplicateIds: string[], zones: CalendarZones) {
   const applied: PreparedMove[] = [];
+  let pendingWrite: string | undefined;
   try {
     for (const move of prepared) {
+      pendingWrite = move.eventId;
       await port.patchEvent(move.eventId, { start: move.startValue, end: move.endValue }, "all", { expectedEtag: move.original.etag ?? undefined });
       applied.push(move);
+      pendingWrite = undefined;
     }
     for (const move of prepared) {
       const verified = await port.getEvent(move.eventId);
@@ -408,8 +411,10 @@ async function applyMovePlan(port: CalendarPort, prepared: PreparedMove[], dupli
       }
     }
     const detail = error instanceof Error ? error.message : String(error);
-    const rollback = rollbackFailures.length ? ` Rollback also failed for: ${rollbackFailures.join(", ")}.` : " All applied moves were rolled back.";
-    const wrapped = new Error(`${detail}${rollback}`);
+    const code = typeof error === "object" && error && "code" in error ? Number(error.code) : undefined;
+    const outcomeUnknown = Boolean(pendingWrite && code !== 412);
+    const rollback = rollbackFailures.length ? ` Rollback also failed for: ${rollbackFailures.join(", ")}.` : outcomeUnknown ? " Acknowledged moves were rolled back." : " All applied moves were rolled back.";
+    const wrapped = Object.assign(new Error(`${detail}${rollback}${outcomeUnknown ? ` The write outcome for ${pendingWrite} is unknown; check Calendar before trying again.` : ""}`), { outcomeUnknown });
     if (typeof error === "object" && error && "code" in error) (wrapped as Error & { code?: number }).code = Number(error.code);
     throw wrapped;
   }

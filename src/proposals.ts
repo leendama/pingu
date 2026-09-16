@@ -29,6 +29,9 @@ export interface Proposal extends ProposalInput {
   outcome?: string;
   deferredUntil?: string;
   payloadHash: string;
+  /** Captured when the owner's approval command is resolved, never inferred by the model. */
+  reviewedBriefingId?: string;
+  reviewedPayloadHash?: string;
   ownerFeedback?: string;
   preferenceKey?: string;
   lastNotifiedAt?: string;
@@ -94,7 +97,7 @@ export class ProposalLedger {
     mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(filename);
     const version = Number((this.db.prepare("PRAGMA user_version").get() as { user_version?: number }).user_version ?? 0);
-    if (version > 3) {
+    if (version > 4) {
       this.db.close();
       throw new Error(`Chief-of-staff data version ${version} is newer than this Pingu supports.`);
     }
@@ -170,7 +173,9 @@ export class ProposalLedger {
       }
       const briefingColumns = this.db.prepare("PRAGMA table_info(briefings)").all() as Array<{ name: string }>;
       if (!briefingColumns.some((column) => column.name === "delivered_text")) this.db.exec("ALTER TABLE briefings ADD COLUMN delivered_text TEXT");
-      this.db.exec("PRAGMA user_version = 3; COMMIT");
+      if (!briefingColumns.some((column) => column.name === "proposal_hashes_json")) this.db.exec("ALTER TABLE briefings ADD COLUMN proposal_hashes_json TEXT");
+      // Legacy briefings have no provable reviewed version. Never backfill from today's payload.
+      this.db.exec("PRAGMA user_version = 4; COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -228,7 +233,7 @@ export class ProposalLedger {
     const existing = this.briefing(reviewKey);
     if (existing) return existing;
     const briefingId = randomUUID();
-    this.db.prepare("INSERT INTO briefings (id, review_key, owner_space_id, proposal_ids_json, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)").run(briefingId, reviewKey, ownerSpaceId, JSON.stringify(proposalIds), now.toISOString());
+    this.db.prepare("INSERT INTO briefings (id, review_key, owner_space_id, proposal_ids_json, proposal_hashes_json, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)").run(briefingId, reviewKey, ownerSpaceId, JSON.stringify(proposalIds), this.snapshotHashes(ownerSpaceId, proposalIds), now.toISOString());
     return this.briefing(reviewKey)!;
   }
 
@@ -254,7 +259,13 @@ export class ProposalLedger {
   }
 
   refreshPendingBriefing(reviewKey: string, ids: string[]): void {
-    this.db.prepare("UPDATE briefings SET proposal_ids_json = ? WHERE review_key = ? AND status = 'pending' AND attempts = 0").run(JSON.stringify(ids), reviewKey);
+    const briefing = this.briefing(reviewKey);
+    if (!briefing) return;
+    this.db.prepare("UPDATE briefings SET proposal_ids_json = ?, proposal_hashes_json = ? WHERE review_key = ? AND status = 'pending' AND attempts = 0").run(JSON.stringify(ids), this.snapshotHashes(briefing.ownerSpaceId, ids), reviewKey);
+  }
+
+  private snapshotHashes(ownerSpaceId: string, ids: readonly string[]): string {
+    return JSON.stringify(Object.fromEntries(this.proposalsById(ids).filter((p) => p.ownerSpaceId === ownerSpaceId).map((p) => [p.id, p.payloadHash])));
   }
 
   hasUnconfirmedBriefing(ownerSpaceId: string): boolean {
@@ -335,16 +346,22 @@ export class ProposalLedger {
     return match ? this.get(match.id) : undefined;
   }
 
-  claimExecution(id: string, now = new Date()): Proposal | undefined {
-    const proposal = this.get(id);
-    if (!proposal || !["proposed", "approved"].includes(proposal.status)) return undefined;
+  claimExecution(id: string, now = new Date(), expected?: { briefingId?: string; payloadHash?: string }): Proposal | undefined {
     // The source version, not model wording, identifies one external action.
     // Two owner chats may hold differently edited copies of the same proposal;
     // only the first approval may act. A later Gmail message has a new sourceId
     // and can therefore produce a fresh reply in the same thread.
-    const actionKey = `${proposal.kind}:${proposal.sourceKey ?? proposal.id}:${proposal.evidence.sourceId ?? proposal.id}`;
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const proposal = this.get(id);
+      if (!proposal || !["proposed", "approved"].includes(proposal.status) || Date.parse(proposal.expiresAt) <= now.getTime()) { this.db.exec("COMMIT"); return undefined; }
+      const briefing = this.db.prepare("SELECT id, proposal_hashes_json FROM briefings WHERE owner_space_id = ? AND status = 'delivered' AND superseded_at IS NULL ORDER BY delivered_at DESC LIMIT 1").get(proposal.ownerSpaceId) as { id: string; proposal_hashes_json?: string } | undefined;
+      const reviewedHash = briefing?.proposal_hashes_json ? (JSON.parse(briefing.proposal_hashes_json) as Record<string, string>)[id] : undefined;
+      if (this.hasUnconfirmedBriefing(proposal.ownerSpaceId) || !reviewedHash || (expected && (expected.briefingId !== briefing?.id || expected.payloadHash !== reviewedHash)) || reviewedHash !== proposal.payloadHash || reviewedHash !== createHash("sha256").update(JSON.stringify(proposal.payload)).digest("hex")) {
+        this.db.exec("COMMIT");
+        return undefined;
+      }
+      const actionKey = `${proposal.kind}:${proposal.sourceKey ?? proposal.id}:${proposal.evidence.sourceId ?? proposal.id}`;
       const claim = this.db.prepare("INSERT INTO action_claims VALUES (?, ?, 'executing', ?) ON CONFLICT(action_key) DO UPDATE SET proposal_id = excluded.proposal_id, status = 'executing', updated_at = excluded.updated_at WHERE action_claims.status IN ('failed','invalidated')").run(actionKey, id, now.toISOString());
       if (Number(claim.changes) !== 1) {
         this.db.prepare("UPDATE proposals SET status = 'invalidated', completed_at = ?, outcome = ? WHERE id = ? AND status IN ('proposed','approved')").run(now.toISOString(), "The same action was already claimed from another owner chat.", id);
@@ -364,8 +381,8 @@ export class ProposalLedger {
   settle(id: string, status: Extract<ProposalStatus, "completed" | "partially_completed" | "failed" | "invalidated">, outcome: string, now = new Date()): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.prepare("UPDATE proposals SET status = ?, outcome = ?, completed_at = ? WHERE id = ? AND status = 'executing'").run(status, outcome, now.toISOString(), id);
-      this.db.prepare("UPDATE action_claims SET status = ?, updated_at = ? WHERE proposal_id = ?").run(status, now.toISOString(), id);
+      const result = this.db.prepare("UPDATE proposals SET status = ?, outcome = ?, completed_at = ? WHERE id = ? AND status = 'executing'").run(status, outcome, now.toISOString(), id);
+      if (Number(result.changes) === 1) this.db.prepare("UPDATE action_claims SET status = ?, updated_at = ? WHERE proposal_id = ?").run(status, now.toISOString(), id);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -432,15 +449,24 @@ export class ProposalLedger {
   }
 
   updateEmailDraftBody(ownerSpaceId: string, ordinal: number, body: string): Proposal | undefined {
-    const briefing = this.db.prepare("SELECT proposal_ids_json FROM briefings WHERE owner_space_id = ? AND status = 'delivered' AND superseded_at IS NULL ORDER BY delivered_at DESC LIMIT 1").get(ownerSpaceId) as { proposal_ids_json?: string } | undefined;
-    const id = briefing?.proposal_ids_json ? (JSON.parse(briefing.proposal_ids_json) as string[])[ordinal - 1] : undefined;
-    const proposal = id ? this.get(id) : undefined;
-    if (!proposal || proposal.kind !== "email_draft" || proposal.status !== "proposed") return undefined;
-    const payload = proposal.payload as Record<string, unknown>;
-    const payloadJson = JSON.stringify({ ...payload, body });
-    const payloadHash = createHash("sha256").update(payloadJson).digest("hex");
-    this.db.prepare("UPDATE proposals SET payload_json = ?, payload_hash = ?, detail = ? WHERE id = ? AND status = 'proposed'").run(payloadJson, payloadHash, body, proposal.id);
-    return this.get(proposal.id);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const briefing = this.db.prepare("SELECT id, proposal_ids_json, proposal_hashes_json FROM briefings WHERE owner_space_id = ? AND status = 'delivered' AND superseded_at IS NULL ORDER BY delivered_at DESC LIMIT 1").get(ownerSpaceId) as { id: string; proposal_ids_json?: string; proposal_hashes_json?: string } | undefined;
+      const id = briefing?.proposal_ids_json ? (JSON.parse(briefing.proposal_ids_json) as string[])[ordinal - 1] : undefined;
+      const proposal = id ? this.get(id) : undefined;
+      const hashes: Record<string, string> = briefing?.proposal_hashes_json ? JSON.parse(briefing.proposal_hashes_json) : {};
+      if (!proposal || proposal.kind !== "email_draft" || proposal.status !== "proposed" || hashes[proposal.id] !== proposal.payloadHash || proposal.payloadHash !== createHash("sha256").update(JSON.stringify(proposal.payload)).digest("hex")) { this.db.exec("COMMIT"); return undefined; }
+      const payload = proposal.payload as Record<string, unknown>;
+      const payloadJson = JSON.stringify({ ...payload, body });
+      const payloadHash = createHash("sha256").update(payloadJson).digest("hex");
+      this.db.prepare("UPDATE proposals SET payload_json = ?, payload_hash = ?, detail = ? WHERE id = ? AND status = 'proposed'").run(payloadJson, payloadHash, body, proposal.id);
+      // The explicit owner edit supplies the new body; all other fields retain their reviewed version.
+      hashes[proposal.id] = payloadHash;
+      this.db.prepare("UPDATE briefings SET proposal_hashes_json = ? WHERE id = ?").run(JSON.stringify(hashes), briefing!.id);
+      const updated = this.get(proposal.id);
+      this.db.exec("COMMIT");
+      return updated;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   parseCommand(ownerSpaceId: string, text: string, now = new Date(), timezone = "UTC"): ProposalCommand | undefined {
@@ -470,7 +496,8 @@ export class ProposalLedger {
     }
     if (verb === "always surface") return { type: "always_surface", proposal };
     if (verb === "approve") {
-      return { type: "approve", proposal };
+      const snapshot = this.db.prepare("SELECT id, proposal_hashes_json FROM briefings WHERE owner_space_id = ? AND status = 'delivered' AND superseded_at IS NULL ORDER BY delivered_at DESC LIMIT 1").get(ownerSpaceId) as { id: string; proposal_hashes_json?: string } | undefined;
+      return { type: "approve", proposal: { ...proposal, reviewedBriefingId: snapshot?.id, reviewedPayloadHash: snapshot?.proposal_hashes_json ? (JSON.parse(snapshot.proposal_hashes_json) as Record<string, string>)[id] : undefined } };
     }
     if (verb === "reject" || verb === "ignore" || verb === "not important") {
       const status = verb === "reject" ? "rejected" : "ignored";

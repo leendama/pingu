@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ProposalLedger } from "./proposals.js";
+import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 
 const directories: string[] = [];
 
@@ -17,6 +19,48 @@ async function ledger(): Promise<ProposalLedger> {
 }
 
 describe("ProposalLedger", () => {
+  it("rejects payload changes even when the stored payload hash is updated with them", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pingu-reviewed-version-")); directories.push(directory);
+    const path = join(directory, "ledger.sqlite");
+    const store = new ProposalLedger(path);
+    const proposal = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Reply", detail: "original", payload: { body: "original" }, evidence: { sourceType: "gmail", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00Z" });
+    store.bindBriefing("owner", [proposal.id], new Date(), "reviewed"); store.markBriefingDelivered("reviewed");
+    const db = new DatabaseSync(path);
+    const changed = JSON.stringify({ body: "changed without owner review" });
+    db.prepare("UPDATE proposals SET payload_json = ?, payload_hash = ? WHERE id = ?").run(changed, createHash("sha256").update(changed).digest("hex"), proposal.id);
+    expect(store.claimExecution(proposal.id)).toBeUndefined();
+    expect(store.updateEmailDraftBody("owner", 1, "new body")).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM action_claims").get()).toMatchObject({ count: 0 });
+    db.close(); store.close();
+  });
+
+  it("rejects an old approval after an explicit edit and accepts a fresh approval", async () => {
+    const store = await ledger();
+    const proposal = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Reply", detail: "original", payload: { body: "original", to: ["person@example.test"] }, evidence: { sourceType: "gmail", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00Z" });
+    store.bindBriefing("owner", [proposal.id], new Date(), "reviewed"); store.markBriefingDelivered("reviewed");
+    const old = store.parseCommand("owner", "approve 1")!.proposal;
+    expect(store.updateEmailDraftBody("owner", 1, "owner replacement")?.payload).toMatchObject({ body: "owner replacement" });
+    expect(store.claimExecution(proposal.id, new Date(), { briefingId: old.reviewedBriefingId, payloadHash: old.reviewedPayloadHash })).toBeUndefined();
+    const current = store.parseCommand("owner", "approve 1")!.proposal;
+    expect(store.claimExecution(proposal.id, new Date(), { briefingId: current.reviewedBriefingId, payloadHash: current.reviewedPayloadHash })?.payload).toMatchObject({ body: "owner replacement" });
+    store.settle(proposal.id, "completed", "done");
+    store.settle(proposal.id, "failed", "late unrelated failure");
+    expect(store.currentBriefingProposals("owner")[0]?.status).toBe("completed");
+    store.close();
+  });
+
+  it("does not invent approval versions for legacy briefings on migration", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pingu-legacy-version-")); directories.push(directory);
+    const path = join(directory, "ledger.sqlite"); let store = new ProposalLedger(path);
+    const proposal = store.create({ ownerSpaceId: "owner", kind: "email_draft", summary: "Reply", detail: "", payload: {}, evidence: { sourceType: "gmail", rationale: "", confidence: 1 }, expiresAt: "2030-01-01T00:00:00Z" });
+    store.bindBriefing("owner", [proposal.id], new Date(), "legacy"); store.markBriefingDelivered("legacy"); store.close();
+    const db = new DatabaseSync(path); db.exec("ALTER TABLE briefings DROP COLUMN proposal_hashes_json; PRAGMA user_version = 3"); db.close();
+    store = new ProposalLedger(path);
+    expect(store.claimExecution(proposal.id)).toBeUndefined();
+    store.bindBriefing("owner", [proposal.id], new Date(), "fresh-review"); store.markBriefingDelivered("fresh-review");
+    expect(store.claimExecution(proposal.id)?.status).toBe("executing");
+    store.close();
+  });
   it("binds numbered approvals to the current owner briefing", async () => {
     const store = await ledger();
     const proposal = store.create({

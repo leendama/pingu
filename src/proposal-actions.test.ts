@@ -21,6 +21,56 @@ async function setup() {
 }
 
 describe("proposal commands", () => {
+  it("preserves a verified draft and its claim when preference recording fails", async () => {
+    const { ledger, proposal } = await setup();
+    const createDraft = vi.fn(async () => "verified-draft");
+    const readDraft = async () => ({ id: "verified-draft", message: { threadId: "thread-1", to: "person@example.com", subject: "Re: Hello", body: "Thanks!" } });
+    const gmail = { createDraft, readDraft } as unknown as GmailPort;
+    vi.spyOn(ledger, "recordPreference").mockImplementation(() => { throw new Error("local record failure"); });
+    const result = await handleProposalCommand({ ledger, gmail, ownerSpaceId: "owner", texts: ["approve 1"] });
+    expect(result).toContain("in Gmail and verified");
+    expect(ledger.currentBriefingProposals("owner")[0]?.status).toBe("completed");
+    const other = ledger.create({ ...proposal, ownerSpaceId: "other-owner" });
+    ledger.bindBriefing("other-owner", [other.id], new Date(), "other-briefing");
+    ledger.markBriefingDelivered("other-briefing");
+    await handleProposalCommand({ ledger, gmail, ownerSpaceId: "other-owner", texts: ["approve 1"] });
+    expect(createDraft).toHaveBeenCalledOnce();
+    ledger.close();
+  });
+  it("holds a calendar write when the provider changes the event but loses the response", async () => {
+    const { ledger } = await setup();
+    const proposal = ledger.create({ ownerSpaceId: "owner", kind: "calendar_move", summary: "Move focus", detail: "Focus", sourceKey: "calendar:focus", payload: { timezone: "UTC", moves: [{ eventId: "focus", newStart: "2029-01-01T10:00:00Z", newEnd: "2029-01-01T11:00:00Z", sequenceGroup: null }] }, evidence: { sourceType: "calendar", sourceId: "version-1", rationale: "Move", confidence: 1 }, expiresAt: "2030-01-01T00:00:00Z" });
+    ledger.bindBriefing("owner", [proposal.id], new Date(), "calendar"); ledger.markBriefingDelivered("calendar");
+    let event = { id: "focus", summary: "Focus", start: { dateTime: "2029-01-01T09:00:00Z" }, end: { dateTime: "2029-01-01T10:00:00Z" } };
+    const patchEvent = vi.fn(async (_id: string, patch: typeof event) => { event = { ...event, ...patch }; throw new Error("response lost"); });
+    const calendar = { getTimezone: async () => "UTC", getEvent: async () => event, listEvents: async () => [], patchEvent } as unknown as CalendarPort;
+    const result = await handleProposalCommand({ ledger, calendar, gmail: {} as GmailPort, ownerSpaceId: "owner", texts: ["approve 1"] });
+    expect(result).toContain("unknown");
+    expect(ledger.currentBriefingProposals("owner")[0]?.status).toBe("partially_completed");
+    expect(ledger.create(proposal).id).toBe(proposal.id);
+    expect(patchEvent).toHaveBeenCalledOnce(); ledger.close();
+  });
+  it.each(["creation-timeout", "verification-timeout", "verification-mismatch", "malformed-verification"])("holds %s without creating a duplicate on another approval", async (failure) => {
+    const { ledger, proposal } = await setup();
+    const createDraft = vi.fn(async () => { if (failure === "creation-timeout") throw new Error("response lost"); return "known-draft"; });
+    const readDraft = vi.fn(async () => {
+      if (failure === "verification-timeout") throw new Error("read unavailable");
+      if (failure === "malformed-verification") return null;
+      return { id: "known-draft", message: { to: "different@example.test", body: "different", subject: "different" } };
+    });
+    const gmail = { createDraft, readDraft } as unknown as GmailPort;
+    const result = await handleProposalCommand({ ledger, gmail, ownerSpaceId: "owner", texts: ["approve 1"] });
+    expect(result).toMatch(/unknown|accepted/);
+    if (failure !== "creation-timeout") expect(result).toContain("known-draft");
+    expect(ledger.currentBriefingProposals("owner")[0]?.status).toBe("partially_completed");
+    expect(ledger.create(proposal).id).toBe(proposal.id);
+    const other = ledger.create({ ...proposal, ownerSpaceId: "other-owner" });
+    ledger.bindBriefing("other-owner", [other.id], new Date(), "other-briefing");
+    ledger.markBriefingDelivered("other-briefing");
+    await handleProposalCommand({ ledger, gmail, ownerSpaceId: "other-owner", texts: ["approve 1"] });
+    expect(createDraft).toHaveBeenCalledOnce();
+    ledger.close();
+  });
   it("leaves ordinary clarification replies with the conversation even when a briefing exists", async () => {
     const { ledger, proposal } = await setup();
     const createDraft = vi.fn();

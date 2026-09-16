@@ -466,7 +466,8 @@ describe("calendarPlugin", () => {
         { event_id: "two", new_start: "2026-09-05T09:00:00Z", new_end: "2026-09-05T10:00:00Z", sequence_group: null },
       ], duplicate_event_ids: [], timezone: "UTC",
     }), context);
-    expect(JSON.parse(result.output).error).toMatch(/All applied moves were rolled back/);
+    expect(JSON.parse(result.output).error).toMatch(/Acknowledged moves were rolled back/);
+    expect(JSON.parse(result.output).error).toMatch(/write outcome for two is unknown/);
     expect(calls.filter((call) => call.method === "patch" && call.eventId === "one")).toHaveLength(2);
   });
 

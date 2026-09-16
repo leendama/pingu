@@ -190,28 +190,44 @@ function sameAddresses(actual: string | null | undefined, expected: string[]): b
   return JSON.stringify(headerAddresses(actual)) === JSON.stringify(expected.map((value) => value.toLowerCase()).sort());
 }
 
+/** Once a write starts, a transport error cannot prove that Gmail did nothing. */
+export class GmailDraftOutcomeError extends Error {
+  constructor(message: string, readonly draftId?: string) { super(message); this.name = "GmailDraftOutcomeError"; }
+}
+
 export async function createVerifiedGmailDraft(port: GmailPort, input: {
   to: string[]; cc: string[]; bcc: string[]; subject: string; body: string;
   threadId?: string; inReplyTo?: string; references?: string;
 }): Promise<string> {
-  const draftId = await port.createDraft(buildRawEmail({
+  const raw = buildRawEmail({
     to: input.to, cc: input.cc, bcc: input.bcc, subject: input.subject, body: input.body,
     in_reply_to: input.inReplyTo, references: input.references,
-  }), input.threadId);
+  });
+  let draftId: string;
+  try { draftId = await port.createDraft(raw, input.threadId); }
+  catch { throw new GmailDraftOutcomeError("Gmail draft creation was attempted, but its outcome is unknown. Check Gmail before trying again."); }
+  if (!draftId) throw new GmailDraftOutcomeError("Gmail returned no draft ID; creation could not be verified. Check Gmail before trying again.");
   if (!port.readDraft) return draftId;
-  const readBack = await port.readDraft(draftId);
-  const message = readBack.message;
-  if (readBack.id !== draftId
-    || !message
-    || (input.threadId && message.threadId !== input.threadId)
-    || !sameAddresses(message.to, input.to)
-    || !sameAddresses(message.cc, input.cc)
-    || !sameAddresses(message.bcc, input.bcc)
-    || decodeHeader(message.subject) !== input.subject
-    || !message.body.includes(input.body.trim())) {
-    throw new Error("Gmail accepted the draft but its read-back did not match.");
+  let readBack: Awaited<ReturnType<NonNullable<GmailPort["readDraft"]>>>;
+  try { readBack = await port.readDraft(draftId); }
+  catch { throw new GmailDraftOutcomeError("Gmail accepted the draft, but verification failed. Check the existing draft before trying again.", draftId); }
+  try {
+    const message = readBack.message;
+    if (readBack.id !== draftId
+      || !message
+      || (input.threadId && message.threadId !== input.threadId)
+      || !sameAddresses(message.to, input.to)
+      || !sameAddresses(message.cc, input.cc)
+      || !sameAddresses(message.bcc, input.bcc)
+      || decodeHeader(message.subject) !== input.subject
+      || !message.body.includes(input.body.trim())) {
+      throw new GmailDraftOutcomeError("Gmail accepted the draft but its read-back did not match.", draftId);
+    }
+    return draftId;
+  } catch (error) {
+    if (error instanceof GmailDraftOutcomeError) throw error;
+    throw new GmailDraftOutcomeError("Gmail accepted the draft, but returned an invalid verification result.", draftId);
   }
-  return draftId;
 }
 
 export function gmailPlugin(port: GmailPort, _legacyPendingEmails?: PendingEmailStore): PinguPlugin {
@@ -299,7 +315,12 @@ export function gmailPlugin(port: GmailPort, _legacyPendingEmails?: PendingEmail
           if (stringArray(args.to).length === 0) throw new Error("At least one recipient is required.");
           const rawBody = typeof args.body === "string" ? args.body : "";
           const body = appendPinguSignature(rawBody);
-          const draftId = await createVerifiedGmailDraft(port, { to: stringArray(args.to), cc: stringArray(args.cc), bcc: stringArray(args.bcc), subject: stringValue(args.subject) ?? "", body: rawBody });
+          let draftId: string;
+          try { draftId = await createVerifiedGmailDraft(port, { to: stringArray(args.to), cc: stringArray(args.cc), bcc: stringArray(args.bcc), subject: stringValue(args.subject) ?? "", body: rawBody }); }
+          catch (error) {
+            if (!(error instanceof GmailDraftOutcomeError)) throw error;
+            return { output: JSON.stringify({ error: error.message, created: error.draftId ? true : "unknown", verified: false, draft_id: error.draftId, retry_allowed: false }) };
+          }
           return {
             draftPreview: { draftId, to: stringArray(args.to), cc: stringArray(args.cc), bcc: stringArray(args.bcc), subject: stringValue(args.subject) ?? "", body },
             output: JSON.stringify({

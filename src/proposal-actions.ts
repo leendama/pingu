@@ -1,4 +1,4 @@
-import { createVerifiedGmailDraft, type GmailPort } from "./capabilities/gmail.js";
+import { createVerifiedGmailDraft, GmailDraftOutcomeError, type GmailPort } from "./capabilities/gmail.js";
 import { applyVerifiedCalendarMovePlan, type CalendarPort, type RescheduleMove } from "./capabilities/calendar.js";
 import { ProposalLedger, type Proposal } from "./proposals.js";
 
@@ -56,8 +56,9 @@ function decisionPreferenceKey(proposal: Proposal, decision: string): string {
 }
 
 export async function executeEmailDraftProposal(ledger: ProposalLedger, gmail: GmailPort, proposal: Proposal): Promise<string> {
-  const claimed = ledger.claimExecution(proposal.id);
+  const claimed = ledger.claimExecution(proposal.id, new Date(), { briefingId: proposal.reviewedBriefingId, payloadHash: proposal.reviewedPayloadHash });
   if (!claimed) return "That proposal is already being handled or is no longer current.";
+  let verifiedDraftId: string | undefined;
   try {
     const payload = emailPayload(claimed);
     if (payload.threadId && payload.sourceMessageId && gmail.readThread) {
@@ -68,7 +69,7 @@ export async function executeEmailDraftProposal(ledger: ProposalLedger, gmail: G
         return "A newer reply arrived in that thread. I’ll prepare a fresh draft.";
       }
     }
-    await createVerifiedGmailDraft(gmail, payload);
+    verifiedDraftId = await createVerifiedGmailDraft(gmail, payload);
     const outcome = "Draft created and verified in Gmail for manual sending.";
     ledger.settle(proposal.id, "completed", outcome);
     const preference = ledger.recordPreference({ key: `email:${proposal.evidence.contact ?? "unknown"}:approved`, value: "Owner approved a drafted reply.", confidence: 1, evidenceCount: 1 });
@@ -76,14 +77,23 @@ export async function executeEmailDraftProposal(ledger: ProposalLedger, gmail: G
     return "Draft’s in Gmail. Review and send it there.";
   } catch (error) {
     const message = error instanceof Error ? error.message : "Gmail draft creation failed.";
+    if (verifiedDraftId) {
+      ledger.settle(proposal.id, "partially_completed", `Draft ${verifiedDraftId} verified; local bookkeeping failed.`);
+      return "Draft’s in Gmail and verified. I couldn’t finish saving its local record; check the existing draft before trying again.";
+    }
+    if (error instanceof GmailDraftOutcomeError) {
+      ledger.settle(proposal.id, "partially_completed", JSON.stringify({ message, draftId: error.draftId, retryAllowed: false }));
+      return `${message}${error.draftId ? ` Draft ID: ${error.draftId}.` : ""} I won't create another draft for this proposal.`;
+    }
     ledger.settle(proposal.id, "failed", message);
     return `I couldn't create that Gmail draft: ${message}`;
   }
 }
 
 export async function executeCalendarMoveProposal(ledger: ProposalLedger, calendar: CalendarPort, proposal: Proposal): Promise<string> {
-  const claimed = ledger.claimExecution(proposal.id);
+  const claimed = ledger.claimExecution(proposal.id, new Date(), { briefingId: proposal.reviewedBriefingId, payloadHash: proposal.reviewedPayloadHash });
   if (!claimed) return "That proposal is already being handled or is no longer current.";
+  let verified = false;
   try {
     const payload = claimed.payload as Partial<CalendarMoveProposalPayload>;
     if (!Array.isArray(payload.moves) || payload.moves.length === 0 || typeof payload.timezone !== "string") {
@@ -100,6 +110,7 @@ export async function executeCalendarMoveProposal(ledger: ProposalLedger, calend
       }
     }
     const result = await applyVerifiedCalendarMovePlan(calendar, payload.moves, payload.duplicateEventIds ?? [], payload.timezone, { bufferMinutes: payload.bufferMinutes });
+    verified = true;
     const outcome = `${result.moved} event(s) moved and verified; ${result.deletedDuplicates} duplicate(s) deleted.`;
     ledger.settle(proposal.id, "completed", outcome);
     const preference = ledger.recordPreference({ key: "calendar:reshuffle:approved", value: claimed.summary, confidence: 1, evidenceCount: 1 });
@@ -107,8 +118,13 @@ export async function executeCalendarMoveProposal(ledger: ProposalLedger, calend
     return result.deletedDuplicates ? `Done. Moved ${result.moved}; deleted ${result.deletedDuplicates} duplicate${result.deletedDuplicates === 1 ? "" : "s"}.` : `Done. Moved ${result.moved} event${result.moved === 1 ? "" : "s"}.`;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Calendar reshuffle failed.";
+    if (verified) {
+      ledger.settle(proposal.id, "partially_completed", "Calendar changes verified; local bookkeeping failed.");
+      return "The calendar changes are verified. I couldn’t finish saving their local record; check Calendar before trying again.";
+    }
     const code = typeof error === "object" && error && "code" in error ? Number(error.code) : undefined;
-    const partial = /Rollback also failed|Moves verified, but duplicate cleanup/.test(message);
+    const partial = /Rollback also failed|Moves verified, but duplicate cleanup/.test(message)
+      || Boolean(error && typeof error === "object" && "outcomeUnknown" in error && error.outcomeUnknown === true);
     ledger.settle(proposal.id, partial ? "partially_completed" : code === 412 || /changed after the proposal|no longer exists/.test(message) ? "invalidated" : "failed", message);
     if (partial) return `That calendar plan only partly completed: ${message} Check Calendar before approving a fresh plan.`;
     return `I couldn't apply that calendar plan: ${message}`;
@@ -116,7 +132,7 @@ export async function executeCalendarMoveProposal(ledger: ProposalLedger, calend
 }
 
 export async function executeHistoryImportProposal(ledger: ProposalLedger, proposal: Proposal, runImport: (proposal: Proposal) => Promise<void>): Promise<string> {
-  const claimed = ledger.claimExecution(proposal.id);
+  const claimed = ledger.claimExecution(proposal.id, new Date(), { briefingId: proposal.reviewedBriefingId, payloadHash: proposal.reviewedPayloadHash });
   if (!claimed) return "That proposal is already being handled or is no longer current.";
   try {
     await runImport(claimed);

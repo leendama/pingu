@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { markdown, Spectrum } from "spectrum-ts";
 import type { Message, Space } from "spectrum-ts";
 import { builtInPlugins } from "./builtin-plugin.js";
+import { openaiWebResearchPort } from "./web-research.js";
 import { loadCommunityPlugins } from "./community-plugins.js";
 import { admitGuestMessage, firstContactDisclosure, recordGuestUsage, releaseGuestReservation, resetGuestReservations } from "./guests.js";
 import { createMessageProcessor, inboundMessageText, senderRuns } from "./message-pipeline.js";
@@ -235,7 +236,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   });
 
   const registry = new PluginRegistry([
-    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH }),
+    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
     ...await loadCommunityPlugins(),
   ]);
   const instructions = agentInstructions(settings, registry.instructions);

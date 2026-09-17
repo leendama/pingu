@@ -14,7 +14,7 @@ Remaining: automated reconciliation of uncertain provider outcomes and task resu
 
 | Stage | Current state | Next implementation and acceptance checks |
 | --- | --- | --- |
-| Read-only web research | Not implemented | Search and fetch with source URLs, dates, bounded requests, and untrusted-content isolation. Evaluate grounded answers, stale sources, conflicting claims, and failed fetches. |
+| Read-only web research | Implemented for the OpenAI endpoint; live quality evaluation remains | Hosted search and page research preserve source citations and retrieval timestamps, bound requests, and isolate third-party content. Offline tests cover missing evidence, failed requests, page-open checks, and write isolation. Evaluate real answers against dated, conflicting, and inaccessible sources before calling this stage validated. |
 | Background workflows | On-demand workflows exist; general scheduled runner does not | Build durable run records, checkpoints, leases, cancellation, bounded retries, and delivery deduplication. Test restarts at every write/delivery boundary. Depends on reconciliation above. |
 | Commitments and source retrieval | Basic follow-up tracking and Markdown search exist | Add source-linked commitment lifecycle and stronger retrieval. Evaluate missed obligations, false obligations, stale commitments, and citation accuracy against labelled fixtures. |
 | Browser actions | Not implemented | Route proposed submissions through reviewed action snapshots, revalidate the page before execution, and reconcile uncertain submissions. Depends on reliable execution and source isolation; test changed pages, expired approval, and lost responses. |

@@ -20,6 +20,8 @@ import type { ProposalLedger } from "./proposals.js";
 import { PersonalState } from "./personal-state.js";
 import { personalStatePlugin } from "./capabilities/personal-state.js";
 import { personalBrainPlugin } from "./capabilities/personal-brain.js";
+import { webResearchPlugin } from "./capabilities/web-research.js";
+import type { WebResearchPort } from "./web-research.js";
 
 export interface BuiltInOptions {
   /** Register the voice tool. Only an OpenAI provider can synthesise speech. */
@@ -29,6 +31,7 @@ export interface BuiltInOptions {
   proposalLedger?: ProposalLedger;
   personalState?: PersonalState;
   vaultPath?: string;
+  webResearch?: WebResearchPort;
 }
 
 export function builtInPlugins(
@@ -46,6 +49,7 @@ export function builtInPlugins(
     remindersPlugin({ create: createReminder, list: listReminders, cancel: cancelReminder, countBySender: countRemindersBySender }, { guestMaxReminders: settings?.guest?.maxReminders }),
     imessagePlugin({ voice: options.voice ?? true }),
     personalStatePlugin(personalState),
+    ...(options.webResearch ? [webResearchPlugin(options.webResearch)] : []),
     ...(options.vaultPath ? [personalBrainPlugin(options.vaultPath)] : []),
     privacyPlugin({ forget: async (spaceId) => { await forgetTranscript(spaceId); await personalState.forget(spaceId); } }),
     ...(options.proposalLedger ? [workflowsPlugin(options.proposalLedger)] : []),

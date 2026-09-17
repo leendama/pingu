@@ -1,6 +1,6 @@
 import type { ProposalLedger } from "./proposals.js";
 
-export const WORKFLOW_READ_TOOLS = ["get_current_time", "search_gmail", "read_gmail_message", "search_calendar", "read_calendar_event", "list_granola_notes", "get_granola_note", "search_personal_brain", "read_personal_note", "list_commitments", "list_task_checkpoints"] as const;
+export const WORKFLOW_READ_TOOLS = ["get_current_time", "search_gmail", "read_gmail_message", "search_calendar", "read_calendar_event", "list_granola_notes", "get_granola_note", "search_personal_brain", "read_personal_note", "list_commitments", "list_task_checkpoints", "search_web", "read_web_page"] as const;
 export type WorkflowReadTool = typeof WORKFLOW_READ_TOOLS[number];
 
 export interface WorkflowDefinition {

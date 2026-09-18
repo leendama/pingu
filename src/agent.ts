@@ -291,14 +291,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
         for (const spaceId of await ownerSpaceIds()) await personalState.reconcile(gmail, spaceId);
       }) : () => undefined;
   const stopChiefGmail = settings.chiefOfStaff.enabled
-    ? startGmailHistoryScheduler(gmail, proposalLedger, async (messageId) => {
-        try {
-          await chiefOfStaff.reviewIncomingEmail(messageId);
-        } catch (error) {
-          await reportChiefFailure(`gmail:${messageId}`, "Email review is delayed. Check Gmail for urgent mail; I’ll retry.");
-          throw error;
-        }
-      }, 60_000, {
+    ? startGmailHistoryScheduler(gmail, proposalLedger, (messageId) => chiefOfStaff.reviewIncomingEmail(messageId), 60_000, {
         onFailure: () => reportChiefFailure("gmail:mailbox", "Email review is delayed. Check Gmail for urgent mail; I’ll retry."),
         onRecovered: () => {
           for (const entry of proposalLedger.metadataWithPrefix("chief-of-staff:reported-failure:gmail:")) proposalLedger.deleteMetadata(entry.key);

@@ -10,6 +10,9 @@ export interface GmailCursorStore {
 
 export const GMAIL_HISTORY_CURSOR_KEY = "chief-of-staff:gmail-history-id";
 export const GMAIL_RETRY_PREFIX = "chief-of-staff:gmail-retry:";
+export const GMAIL_HEALTH_KEY = "chief-of-staff:gmail-health";
+const FAILURE_NOTICE_GRACE_MS = 3 * 60_000;
+const MAILBOX_MAX_RETRY_MS = 5 * 60_000;
 const FIRST_RETRY_MS = 60_000;
 const MAX_RETRY_MS = 60 * 60_000;
 
@@ -53,8 +56,8 @@ async function processMessageIds(
       store.deleteMetadata(retryKey(messageId));
       processed += 1;
     } catch {
-      // The agent has already reported the specific failure. Persist a retry and
-      // continue, so one malformed or temporarily unavailable message cannot
+      // Persist a retry before reporting health at the scheduler level.
+      // Continue, so one malformed or temporarily unavailable message cannot
       // block later inbox history.
       deferMessage(store, messageId, now);
       failed += 1;
@@ -118,18 +121,43 @@ export function startGmailHistoryScheduler(
   const now = options.now ?? Date.now;
   let failures = 0;
   let retryAfter = 0;
+  // Persist the incident clock so restarting does not hide a prolonged outage.
+  let health: { delayedSince?: number; lastSuccessfulScanAt?: string; lastHealthyAt?: string; pendingReviews?: number; failureKind?: string } = {};
+  try { health = JSON.parse(store.getMetadata(GMAIL_HEALTH_KEY) ?? "{}"); } catch { /* Old/corrupt diagnostic state is not a mailbox cursor. */ }
+  if (!health || typeof health !== "object") health = {};
+  const saveHealth = () => store.setMetadata(GMAIL_HEALTH_KEY, JSON.stringify(health));
+  const reportDelay = async (kind: string) => {
+    if (typeof health.delayedSince !== "number" || !Number.isFinite(health.delayedSince)) health.delayedSince = now();
+    health.failureKind = kind;
+    health.pendingReviews = store.metadataWithPrefix(GMAIL_RETRY_PREFIX).length;
+    saveHealth();
+    if (now() - health.delayedSince >= FAILURE_NOTICE_GRACE_MS) {
+      try { await options.onFailure?.(); }
+      catch { console.error("Gmail review delay notification unavailable; retrying on the next scan."); }
+    }
+  };
   return startPoller("Chief of staff Gmail history", intervalMs, async () => {
     if (now() < retryAfter) return;
+    let result: Awaited<ReturnType<typeof ingestGmailHistory>>;
     try {
-      const result = await ingestGmailHistory(gmail, store, onMessage, { now: () => new Date(now()) });
-      failures = 0;
-      retryAfter = 0;
-      if (!result.failed && store.metadataWithPrefix(GMAIL_RETRY_PREFIX).length === 0) options.onRecovered?.();
+      result = await ingestGmailHistory(gmail, store, onMessage, { now: () => new Date(now()) });
     } catch (error) {
       failures += 1;
-      retryAfter = now() + Math.min(MAX_RETRY_MS, FIRST_RETRY_MS * 2 ** Math.min(failures - 1, 6));
-      await options.onFailure?.();
+      retryAfter = now() + Math.min(MAILBOX_MAX_RETRY_MS, FIRST_RETRY_MS * 2 ** Math.min(failures - 1, 6));
+      await reportDelay("mailbox");
       throw error;
     }
+    failures = 0;
+    retryAfter = 0;
+    health.lastSuccessfulScanAt = new Date(now()).toISOString();
+    if (result.failed || store.metadataWithPrefix(GMAIL_RETRY_PREFIX).length > 0) {
+      await reportDelay("message_review");
+      return;
+    }
+    health = { lastSuccessfulScanAt: health.lastSuccessfulScanAt, lastHealthyAt: new Date(now()).toISOString(), pendingReviews: 0 };
+    saveHealth();
+    // A delivery failure must not mark a successful mailbox scan as failed.
+    try { options.onRecovered?.(); }
+    catch { console.error("Gmail review recovery bookkeeping failed; retrying on the next scan."); }
   });
 }

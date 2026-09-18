@@ -20,3 +20,9 @@ Remaining: automated reconciliation of uncertain provider outcomes and task resu
 | Browser actions | Not implemented | Route proposed submissions through reviewed action snapshots, revalidate the page before execution, and reconcile uncertain submissions. Depends on reliable execution and source isolation; test changed pages, expired approval, and lost responses. |
 
 Each stage needs its own end-to-end evaluation before enabling it. Passing unit tests alone does not establish that the assistant reliably chooses the right action.
+
+## Gmail scanner health
+
+Transient failures retry silently for three minutes. Both whole-mailbox failures and queued message reviews use the same persisted incident clock; restarting does not reset that grace period. A sustained delay uses the existing single-incident owner warning. Whole-mailbox retries are capped at five minutes, while individual failed messages retain durable exponential retries. A warning delivery failure does not prevent queue persistence or turn a healthy scan into a failed one.
+
+The ledger metadata key `chief-of-staff:gmail-health` records the last successful mailbox scan, last fully healthy scan, queued-review count, and whether the delay is at the mailbox or message-review stage. These are operational diagnostics, not email content. A successful mailbox scan alone does not count as full recovery while reviews remain queued.

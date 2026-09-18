@@ -35,7 +35,8 @@ export async function reconcileActions(ledger: ProposalLedger, gmail: GmailPort,
           const event = await calendar.getEvent(move.eventId);
           const start = event?.start as { dateTime?: string } | undefined;
           const end = event?.end as { dateTime?: string } | undefined;
-          if (!event || event.status === "cancelled" || !move.newStart || !move.newEnd
+          const zoned = (value: string | undefined) => typeof value === "string" && /(?:Z|[+-]\d{2}:\d{2})$/.test(value);
+          if (!event || event.status === "cancelled" || !zoned(move.newStart) || !zoned(move.newEnd) || !zoned(start?.dateTime) || !zoned(end?.dateTime)
             || !start?.dateTime || !end?.dateTime
             || Date.parse(start.dateTime) !== Date.parse(move.newStart)
             || Date.parse(end.dateTime) !== Date.parse(move.newEnd)) { matches = false; break; }

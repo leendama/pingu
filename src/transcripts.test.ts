@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ResponseInputItem } from "openai/resources/responses/responses";
 import { appendTranscript, cleanupTranscripts, compactEntries, deleteAllPinguData, forgetTranscript, readTranscript, type TranscriptEntry } from "./transcripts.js";
 import { ProposalLedger } from "./proposals.js";
+import { WorkflowRuns } from "./workflow-runs.js";
+import { DEFAULT_WORKFLOWS } from "./workflows.js";
 
 let directory: string;
 const settings = { retentionDays: 30, maxEntries: 80, maxChars: 60_000 };
@@ -127,4 +129,15 @@ describe("transcript files", () => {
     expect(await readdir(join(directory, "transcripts"))).toHaveLength(1);
     expect(await readTranscript("active", settings, now)).toEqual([user("recent")]);
   });
+});
+
+
+it("clears scheduled workflows through the live database connection during full reset", async () => {
+  const runs = new WorkflowRuns(join(directory,"workflow-runs.sqlite"));
+  try {
+    runs.schedule("owner",DEFAULT_WORKFLOWS[0]!,"Review", "2029-01-02T00:00:00Z",24,new Date("2029-01-01T00:00:00Z"));
+    const result = await deleteAllPinguData();
+    expect(result.files).toContain("workflow-runs.sqlite");
+    expect(runs.list("owner")).toEqual([]);
+  } finally { runs.close(); }
 });

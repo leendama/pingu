@@ -36,4 +36,12 @@ describe("read-only action reconciliation",()=>{
     const {ledger,close}=await setup("calendar_move");const patchEvent=vi.fn();
     try{expect(await reconcileActions(ledger,{} as GmailPort,{patchEvent,getEvent:async()=>({start:{dateTime:"2029-01-01T10:00:00+01:00"},end:{dateTime:"2029-01-01T11:00:00+01:00"}})} as unknown as CalendarPort,["owner"])).toBe(1);expect(patchEvent).not.toHaveBeenCalled();}finally{await close();}
   });
+  it("keeps calendar recovery held when the provider returns floating times",async()=>{
+    const {ledger,p,close}=await setup("calendar_move");
+    try {
+      expect(await reconcileActions(ledger,{} as GmailPort,{getEvent:async()=>({start:{dateTime:"2029-01-01T09:00:00"},end:{dateTime:"2029-01-01T10:00:00"}})} as unknown as CalendarPort,["owner"])).toBe(0);
+      expect(ledger.proposalsById([p.id])[0]?.status).toBe("partially_completed");
+    }finally{await close();}
+  });
+
 });

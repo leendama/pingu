@@ -258,7 +258,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const generateReply = createReplyGenerator({
     respond: async (input, context) => client.responses.create({
       model: settings.model,
-      instructions: `${instructions}\n${turnInstructions(settings, context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}${context.role === "owner" && !context.isGroup ? await personalState.context(context.spaceId) : ""}\n${temporalInstructions(settings.timezone)}`,
+      instructions: `${instructions}\n${turnInstructions(settings, context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}${context.role === "owner" && !context.isGroup ? workflowRuns.context(context.spaceId) : ""}${context.role === "owner" && !context.isGroup ? await personalState.context(context.spaceId) : ""}\n${temporalInstructions(settings.timezone)}`,
       input,
       tools: registry.toolsFor(context),
       ...(context.role === "guest" ? { max_output_tokens: settings.guest.maxOutputTokens } : {}),

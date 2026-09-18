@@ -194,13 +194,16 @@ export const PINGU_DATA_FILES = [
   "guests.json",
   "owners.json",
   "scheduling-requests.json",
+  "workflow-runs.sqlite",
+  "workflow-runs.sqlite-shm",
+  "workflow-runs.sqlite-wal",
   "chief-of-staff.sqlite",
   "chief-of-staff.sqlite-shm",
   "chief-of-staff.sqlite-wal",
 ];
 
-async function clearChiefOfStaffLedger(): Promise<boolean> {
-  const filename = dataPath("chief-of-staff.sqlite");
+async function clearChiefOfStaffLedger(name = "chief-of-staff.sqlite", tables = ["action_claims", "briefings", "proposals", "preferences", "metadata"]): Promise<boolean> {
+  const filename = dataPath(name);
   try {
     await access(filename);
   } catch (error) {
@@ -212,7 +215,7 @@ async function clearChiefOfStaffLedger(): Promise<boolean> {
     const existing = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name));
     db.exec("BEGIN IMMEDIATE");
     try {
-      for (const table of ["action_claims", "briefings", "proposals", "preferences", "metadata"]) {
+      for (const table of tables) {
         if (existing.has(table)) db.exec(`DELETE FROM ${table}`);
       }
       db.exec("COMMIT");
@@ -235,8 +238,9 @@ export async function deleteAllPinguData(): Promise<{ transcripts: number; files
   const transcripts = await deleteAllTranscripts();
   const removed: string[] = [];
   if (await clearChiefOfStaffLedger()) removed.push("chief-of-staff.sqlite");
+  if (await clearChiefOfStaffLedger("workflow-runs.sqlite", ["workflow_runs"])) removed.push("workflow-runs.sqlite");
   for (const filename of PINGU_DATA_FILES) {
-    if (filename.startsWith("chief-of-staff.sqlite")) continue;
+    if (filename.startsWith("chief-of-staff.sqlite") || filename.startsWith("workflow-runs.sqlite")) continue;
     try {
       await rm(dataPath(filename), { force: false });
       removed.push(filename);

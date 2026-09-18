@@ -390,6 +390,21 @@ export class ProposalLedger {
     }
   }
 
+  uncertainActions(limit = 10): Proposal[] {
+    const rows = this.db.prepare("SELECT id FROM proposals WHERE status = 'partially_completed' AND kind IN ('email_draft','calendar_move') ORDER BY COALESCE((SELECT value FROM metadata WHERE key = 'reconcile:' || proposals.id), '') ASC LIMIT ?").all(limit) as Array<{ id: string }>;
+    return this.proposalsById(rows.map((row) => row.id));
+  }
+
+  completeReconciled(id: string, outcome: string, now = new Date()): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db.prepare("UPDATE proposals SET status = 'completed', outcome = ?, completed_at = ? WHERE id = ? AND status = 'partially_completed'").run(outcome, now.toISOString(), id);
+      if (Number(result.changes) === 1) this.db.prepare("UPDATE action_claims SET status = 'completed', updated_at = ? WHERE proposal_id = ? AND status = 'partially_completed'").run(now.toISOString(), id);
+      this.db.exec("COMMIT");
+      return Number(result.changes) === 1;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
   invalidateOwnerSpace(ownerSpaceId: string, now = new Date()): number {
     return Number(this.db.prepare("UPDATE proposals SET status = 'invalidated', completed_at = ?, outcome = ? WHERE owner_space_id = ? AND status IN ('proposed','approved','deferred')").run(now.toISOString(), "The owner chat was revoked.", ownerSpaceId).changes);
   }
@@ -441,9 +456,9 @@ export class ProposalLedger {
 
   cleanup(retentionDays: number, now = new Date()): { proposals: number; briefings: number } {
     const cutoff = new Date(now.getTime() - Math.max(0, retentionDays) * 86_400_000).toISOString();
-    const proposals = this.db.prepare("DELETE FROM proposals WHERE status NOT IN ('proposed','approved','executing','deferred') AND COALESCE(completed_at, created_at) <= ?").run(cutoff);
+    const proposals = this.db.prepare("DELETE FROM proposals WHERE status NOT IN ('proposed','approved','executing','deferred','partially_completed') AND COALESCE(completed_at, created_at) <= ?").run(cutoff);
     const briefings = this.db.prepare("DELETE FROM briefings WHERE created_at <= ? AND (status = 'delivered' OR superseded_at IS NOT NULL)").run(cutoff);
-    this.db.prepare("DELETE FROM action_claims WHERE status != 'executing' AND updated_at <= ?").run(cutoff);
+    this.db.prepare("DELETE FROM action_claims WHERE status NOT IN ('executing','partially_completed') AND updated_at <= ?").run(cutoff);
     this.db.prepare("DELETE FROM metadata WHERE (key LIKE 'chief-of-staff:email-reviewed:%' OR key LIKE 'chief-of-staff:reported-failure:%') AND value <= ?").run(cutoff);
     return { proposals: Number(proposals.changes), briefings: Number(briefings.changes) };
   }

@@ -245,6 +245,12 @@ export function googleGmailPort(credentials?: RuntimeSettings["google"]): GmailP
       if (!response.data.id) throw new Error("Gmail did not return a draft ID.");
       return response.data.id;
     },
+    async findDraftIds(messageIdHeader) {
+      const { gmail } = await googleClient(credentials);
+      const result = await gmail.users.drafts.list({ userId: "me", q: `rfc822msgid:${messageIdHeader}`, maxResults: 10 });
+      if (result.data.nextPageToken) throw new Error("Too many matching drafts to reconcile safely.");
+      return (result.data.drafts ?? []).flatMap((draft) => draft.id ? [draft.id] : []);
+    },
     async readDraft(draftId) {
       const { gmail } = await googleClient(credentials);
       const response = await gmail.users.drafts.get({ userId: "me", id: draftId, format: "full" });

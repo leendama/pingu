@@ -11,6 +11,8 @@ export interface GmailPort {
   readThread?(threadId: string): Promise<GmailMessage[]>;
   /** Create a draft from a base64url RFC 2822 message and return its draft ID. */
   createDraft(raw: string, threadId?: string): Promise<string>;
+  /** Find drafts by the unique RFC Message-ID assigned to an approved action. */
+  findDraftIds?(messageIdHeader: string): Promise<string[]>;
   /** Read a draft back after creation so Pingu never claims an unverified outcome. */
   readDraft?(draftId: string): Promise<{ id?: string | null; message?: GmailMessage }>;
   /** Current Gmail mailbox history cursor, used for push-like incremental review. */
@@ -143,7 +145,7 @@ function encodeHeader(value: string): string {
   return `=?UTF-8?B?${Buffer.from(cleanHeader(value), "utf8").toString("base64")}?=`;
 }
 
-function decodeHeader(value: string | null | undefined): string | undefined {
+export function decodeHeader(value: string | null | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
   return value.replace(/=\?([^?]+)\?([bq])\?([^?]*)\?=/gi, (_encoded, charset: string, encoding: string, payload: string) => {
     if (!/^utf-8$/i.test(charset)) return _encoded;
@@ -161,6 +163,7 @@ export function buildRawEmail(args: JsonObject): string {
     `Subject: ${encodeHeader(stringValue(args.subject) ?? "")}`,
     ...(stringValue(args.in_reply_to) ? [`In-Reply-To: ${cleanHeader(stringValue(args.in_reply_to)!)}`] : []),
     ...(stringValue(args.references) ? [`References: ${cleanHeader(stringValue(args.references)!)}`] : []),
+    ...(stringValue(args.message_id_header) ? [`Message-ID: ${cleanHeader(stringValue(args.message_id_header)!)}`] : []),
     "MIME-Version: 1.0",
     `Content-Type: multipart/alternative; boundary="${EMAIL_BOUNDARY}"`,
   ];
@@ -186,7 +189,7 @@ function headerAddresses(value?: string | null): string[] {
     .map((match) => (match[1] ?? match[2])!.toLowerCase()).sort();
 }
 
-function sameAddresses(actual: string | null | undefined, expected: string[]): boolean {
+export function sameAddresses(actual: string | null | undefined, expected: string[]): boolean {
   return JSON.stringify(headerAddresses(actual)) === JSON.stringify(expected.map((value) => value.toLowerCase()).sort());
 }
 
@@ -197,11 +200,11 @@ export class GmailDraftOutcomeError extends Error {
 
 export async function createVerifiedGmailDraft(port: GmailPort, input: {
   to: string[]; cc: string[]; bcc: string[]; subject: string; body: string;
-  threadId?: string; inReplyTo?: string; references?: string;
+  threadId?: string; inReplyTo?: string; references?: string; messageIdHeader?: string;
 }): Promise<string> {
   const raw = buildRawEmail({
     to: input.to, cc: input.cc, bcc: input.bcc, subject: input.subject, body: input.body,
-    in_reply_to: input.inReplyTo, references: input.references,
+    in_reply_to: input.inReplyTo, references: input.references, message_id_header: input.messageIdHeader,
   });
   let draftId: string;
   try { draftId = await port.createDraft(raw, input.threadId); }

@@ -1,3 +1,7 @@
+import { reconcileActions } from "./action-reconciliation.js";
+import { WorkflowRuns, tickWorkflowRuns } from "./workflow-runs.js";
+import { workflowExecutor } from "./workflow-executor.js";
+import { workflowRunsPlugin } from "./capabilities/workflow-runs.js";
 import { imessage } from "@spectrum-ts/imessage";
 import { rm } from "node:fs/promises";
 import { markdown, Spectrum } from "spectrum-ts";
@@ -149,11 +153,12 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const calendar = googleCalendarPort(settings.google);
   const gmail = googleGmailPort(settings.google);
   const proposalLedger = new ProposalLedger();
+  const workflowRuns = new WorkflowRuns();
   const personalState = new PersonalState();
   const legacyProposals = proposalLedger.invalidateLegacyEmailReplyProposals();
   if (legacyProposals) console.log("Invalidated legacy email proposals after the outcome-classification upgrade:", legacyProposals);
   const stopOwnerRemoval = onOwnerRemoved(async (owner) => {
-    if (owner.spaceId) { proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); }
+    if (owner.spaceId) { workflowRuns.forget(owner.spaceId); proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); }
   });
   const structuredReviewer = {
     call: async (prompt: string, tool: import("openai/resources/responses/responses").Tool): Promise<Record<string, unknown>> => {
@@ -222,10 +227,10 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     const owners = new Set(await ownerSpaceIds());
     for (const [spaceId, proposals] of Map.groupBy(interrupted, (proposal) => proposal.ownerSpaceId)) {
       if (!owners.has(spaceId)) {
-        for (const proposal of proposals) proposalLedger.settle(proposal.id, "invalidated", "The owner chat was revoked before the interrupted action could be verified.");
+        for (const proposal of proposals) proposalLedger.settle(proposal.id, "partially_completed", "The owner chat was revoked; the interrupted action remains uncertain and must not be repeated.");
         continue;
       }
-      await deliverToOwner(proactive, spaceId, `I stopped while ${proposals.length === 1 ? "an approved action was" : `${proposals.length} approved actions were`} running, so I can't verify the outcome. Check Gmail or Calendar before asking for a fresh proposal.`);
+      // Hold first; read-only reconciliation can recover without repeating the action.
       for (const proposal of proposals) proposalLedger.settle(proposal.id, "partially_completed", "Pingu restarted before it could verify the provider outcome.");
     }
   });
@@ -236,9 +241,18 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   });
 
   const registry = new PluginRegistry([
-    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
+    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: (spaceId) => workflowRuns.forget(spaceId), webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
+    workflowRunsPlugin(workflowRuns, proposalLedger),
     ...await loadCommunityPlugins(),
   ]);
+  const executeWorkflow = workflowExecutor(client, registry, settings.model, settings.timezone, kind === "openai");
+  const stopWorkflowRuns = startPoller("Workflow runner", 60_000, () => tickWorkflowRuns(workflowRuns, {
+    owners: ownerSpaceIds, execute: executeWorkflow,
+    deliver: (owner, text) => deliverToOwner(proactive, owner, text),
+  }));
+  const stopActionReconciliation = startPoller("Action reconciliation", 60_000, async () => {
+    await reconcileActions(proposalLedger, gmail, calendar, await ownerSpaceIds());
+  });
   const instructions = agentInstructions(settings, registry.instructions);
 
   const generateReply = createReplyGenerator({
@@ -379,6 +393,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       }
       if (!stopping) throw new Error("The Spectrum message stream ended unexpectedly.");
     } finally {
+      stopWorkflowRuns();
+      stopActionReconciliation();
       stopReminders();
       stopEmailAlerts();
       stopScheduling();
@@ -399,6 +415,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     done,
     stop: async () => {
       stopping = true;
+      stopWorkflowRuns();
+      stopActionReconciliation();
       stopReminders();
       stopEmailAlerts();
       stopScheduling();

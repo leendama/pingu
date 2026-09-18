@@ -69,7 +69,7 @@ export async function executeEmailDraftProposal(ledger: ProposalLedger, gmail: G
         return "A newer reply arrived in that thread. I’ll prepare a fresh draft.";
       }
     }
-    verifiedDraftId = await createVerifiedGmailDraft(gmail, payload);
+    verifiedDraftId = await createVerifiedGmailDraft(gmail, { ...payload, messageIdHeader: `<pingu-${claimed.id}@pingu.local>` });
     const outcome = "Draft created and verified in Gmail for manual sending.";
     ledger.settle(proposal.id, "completed", outcome);
     const preference = ledger.recordPreference({ key: `email:${proposal.evidence.contact ?? "unknown"}:approved`, value: "Owner approved a drafted reply.", confidence: 1, evidenceCount: 1 });

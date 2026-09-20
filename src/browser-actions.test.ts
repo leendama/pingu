@@ -56,7 +56,7 @@ it("turns a process interruption after its claim into a held unknown outcome",as
  const id=await prepare();const db=new DatabaseSync(join(dir,"actions.sqlite"));
  db.prepare("UPDATE browser_actions SET status='executing' WHERE id=?").run(id);db.close();
  actions.recoverInterrupted();
- expect(await actions.command("owner",[`check browser ${id}`])).toContain('"status":"unknown"');
+ expect(await actions.command("owner",[`check browser ${id}`])).toContain("unknown.");
  await actions.command("owner",[`confirm browser ${id}`]);expect(submit).not.toHaveBeenCalled();
 });
 

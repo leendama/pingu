@@ -71,7 +71,7 @@ export class BrowserActions {
     const [,verb,id]=matches[0]!;
     const action=this.get(owner,id!.toLowerCase());
     if(!action) return "that browser action isn't available in this chat.";
-    if(verb!.toLowerCase()==="check") return JSON.stringify({id:action.id,status:action.status,receipt:action.receipt,note:"A received HTTP response is evidence of submission, not proof the requested business outcome completed. Unknown outcomes are never automatically retried."});
+    if(verb!.toLowerCase()==="check") return [`browser ${action.id}: ${action.status}.`,action.receipt ? `site response (unverified): ${action.receipt.text.slice(0,350)}\n${action.receipt.url}` : undefined,["unknown","executing"].includes(action.status) ? "i won't repeat it. verify the outcome with the site." : undefined].filter(Boolean).join("\n");
     if(verb!.toLowerCase()==="cancel") {
       const result=this.db.prepare("UPDATE browser_actions SET status='cancelled' WHERE id=? AND owner=? AND status IN ('review_pending','reviewed')").run(action.id,owner);
       return result.changes ? "cancelled." : "this action has already started or ended; cancellation can't undo it.";
@@ -83,7 +83,7 @@ export class BrowserActions {
     try {
       const receipt=await this.port.submit(action.form,action.values);
       this.db.prepare("UPDATE browser_actions SET status='submitted',receipt=? WHERE id=? AND status='executing'").run(JSON.stringify(receipt),action.id);
-      return `submitted once; the site returned HTTP ${receipt.httpStatus}. receipt: ${receipt.url}. this doesn't yet verify completion. check browser ${action.id} for the saved response.`;
+      return receipt.httpStatus>=200 && receipt.httpStatus<400 ? `submitted once. receipt: ${receipt.url}. i haven't verified the outcome yet; check browser ${action.id} for the saved response.` : `the site returned an error (${receipt.httpStatus}). i won't repeat the submission. check browser ${action.id} for the saved response.`;
     } catch(error) {
       const changed=error instanceof BrowserChangedError;
       this.db.prepare("UPDATE browser_actions SET status=? WHERE id=? AND status='executing'").run(changed?"invalidated":"unknown",action.id);

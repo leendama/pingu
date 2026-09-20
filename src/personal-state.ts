@@ -16,6 +16,9 @@ const commitmentSchema = z.object({
   source: z.string().max(1500), threadId: z.string().optional(), messageId: z.string().optional(),
   receivedAt: z.string().optional(), updatedAt: z.string(),
   lastCheckedAt: z.string().optional(),
+  evidence: z.object({ kind: z.enum(["owner_statement", "source_excerpt", "email_reply_request"]), quote: z.string().min(1).max(1500) }).optional(),
+  dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  history: z.array(z.object({ status: z.enum(["open", "reply_sent", "completed", "dismissed"]), at: z.string(), source: z.string().min(1).max(1500), reason: z.string().min(1).max(500) })).default([]),
 });
 export type ActiveTask = z.infer<typeof taskSchema>;
 export type Commitment = z.infer<typeof commitmentSchema>;
@@ -44,7 +47,7 @@ export class PersonalState {
     return (await this.store.read()).commitments.filter((c) => c.spaceId === spaceId && (includeClosed || c.status === "open"))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 100);
   }
-  async saveCommitment(spaceId: string, input: Pick<Commitment, "summary" | "counterparty" | "owedBy" | "source">) {
+  async saveCommitment(spaceId: string, input: Pick<Commitment, "summary" | "counterparty" | "owedBy" | "source"> & Partial<Pick<Commitment, "evidence" | "dueDate">>) {
     // Identical repeated captures are idempotent; unrelated commitments stay separate.
     const id = createHash("sha256").update(JSON.stringify([spaceId, input])).digest("hex").slice(0, 24);
     return this.store.update((state) => {
@@ -55,12 +58,14 @@ export class PersonalState {
       return { result: item, changed: true };
     });
   }
-  async setStatus(spaceId: string, id: string, status: Commitment["status"]) {
+  async setStatus(spaceId: string, id: string, status: Commitment["status"], evidence: { source: string; reason: string }) {
+    const change = commitmentSchema.shape.history.unwrap().element.parse({ status, at: new Date().toISOString(), ...evidence });
     return this.store.update((state) => {
       const item = state.commitments.find((c) => c.id === id && c.spaceId === spaceId);
       if (!item) throw new Error("Commitment not found in this chat.");
       item.status = commitmentSchema.shape.status.parse(status);
       item.updatedAt = new Date().toISOString();
+      item.history = [...item.history, change].slice(-30);
       return { result: item, changed: true };
     });
   }
@@ -72,6 +77,7 @@ export class PersonalState {
       if (existing?.messageId === message.id) return { result: undefined, changed: false };
       if (existing?.receivedAt && receivedTime(message) <= Date.parse(existing.receivedAt)) return { result: undefined, changed: false };
       const item = commitmentSchema.parse({ id, spaceId, summary: summary.slice(0, 500), counterparty: counterparty.slice(0, 200), owedBy: "owner", status: "open", source: `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(message.threadId!)}`, threadId: message.threadId, messageId: message.id, receivedAt: message.receivedAt ?? message.date ?? undefined, updatedAt: new Date().toISOString() });
+      item.history = [...(existing?.history ?? []), { status: "open" as const, at: item.updatedAt, source: `${item.source}/${message.id}`, reason: "New incoming reply requires review." }].slice(-30);
       state.commitments = [...state.commitments.filter((c) => c.id !== id), item];
       return { result: undefined, changed: true };
     });
@@ -96,7 +102,7 @@ export class PersonalState {
       });
       const source = thread.find((m) => m.id === item.messageId);
       if (!source) continue;
-      const replied = thread.some((m) => m.labelIds?.includes("SENT") && !m.labelIds.includes("DRAFT") && receivedTime(m) > receivedTime(source));
+      const replied = thread.find((m) => m.labelIds?.includes("SENT") && !m.labelIds.includes("DRAFT") && receivedTime(m) > receivedTime(source));
       if (!replied) continue;
       await this.store.update((state) => {
         const current = state.commitments.find((c) => c.id === item.id);
@@ -104,6 +110,7 @@ export class PersonalState {
         if (!current || current.messageId !== item.messageId || current.status !== "open") return { result: undefined, changed: false };
         current.status = "reply_sent";
         current.updatedAt = new Date().toISOString();
+        current.history = [...current.history, { status: "reply_sent" as const, at: current.updatedAt, source: `gmail:${replied.id}`, reason: "Verified a later sent message in this thread. This does not prove a deliverable is complete." }].slice(-30);
         return { result: undefined, changed: true };
       });
     }

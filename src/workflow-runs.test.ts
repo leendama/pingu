@@ -17,3 +17,14 @@ describe("durable workflow runs",()=>{
  it("bounds retries and cancels revoked owners before execution",async()=>{const {store,close}=await setup();try{const run=schedule(store);const execute=vi.fn(async()=>{throw new Error("offline");});const deps={owners:async()=>["owner"],execute,deliver:vi.fn()};for(let i=0;i<4;i++)await tickWorkflowRuns(store,deps,due);expect(execute).toHaveBeenCalledTimes(3);expect(store.get(run.id)?.status).toBe("failed");const another=store.schedule("revoked",DEFAULT_WORKFLOWS[0]!,"review",due.toISOString(),0,now);await tickWorkflowRuns(store,{...deps,owners:async()=>[]},due);expect(store.get(another.id)?.status).toBe("cancelled");expect(execute).toHaveBeenCalledTimes(3);}finally{await close();}});
  it("forgets private results and all future work for the owner",async()=>{const {store,close}=await setup();try{schedule(store,24);store.forget("owner");expect(store.list("owner")).toEqual([]);}finally{await close();}});
 });
+
+it("persists local recurrence, advances after a DST change and cancels the series",async()=>{
+ const {store,file,close}=await setup();
+ try{
+  const run=store.schedule("owner",DEFAULT_WORKFLOWS[0]!,"prep","2026-03-07T14:00:00Z",0,new Date("2026-03-07T00:00:00Z"),{frequency:"daily",timezone:"America/New_York"});
+  const other=new WorkflowRuns(file);expect(other.get(run.id)?.recurrence?.localTime).toBe("09:00:00");other.close();
+  store.claim(new Date("2026-03-08T01:00:00Z"));
+  const next=store.list("owner").find(r=>r.status==="queued")!;expect(next.dueAt).toBe("2026-03-08T13:00:00.000Z");
+  store.cancel("owner",run.id);expect(store.get(next.id)?.recurrence).toBeUndefined();expect(store.get(next.id)?.status).toBe("cancelled");
+ }finally{await close();}
+});

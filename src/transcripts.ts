@@ -197,6 +197,9 @@ export const PINGU_DATA_FILES = [
   "workflow-runs.sqlite",
   "workflow-runs.sqlite-shm",
   "workflow-runs.sqlite-wal",
+  "browser-actions.sqlite",
+  "browser-actions.sqlite-shm",
+  "browser-actions.sqlite-wal",
   "chief-of-staff.sqlite",
   "chief-of-staff.sqlite-shm",
   "chief-of-staff.sqlite-wal",
@@ -239,8 +242,9 @@ export async function deleteAllPinguData(): Promise<{ transcripts: number; files
   const removed: string[] = [];
   if (await clearChiefOfStaffLedger()) removed.push("chief-of-staff.sqlite");
   if (await clearChiefOfStaffLedger("workflow-runs.sqlite", ["workflow_runs"])) removed.push("workflow-runs.sqlite");
+  if (await clearChiefOfStaffLedger("browser-actions.sqlite", ["browser_actions"])) removed.push("browser-actions.sqlite");
   for (const filename of PINGU_DATA_FILES) {
-    if (filename.startsWith("chief-of-staff.sqlite") || filename.startsWith("workflow-runs.sqlite")) continue;
+    if (filename.startsWith("chief-of-staff.sqlite") || filename.startsWith("workflow-runs.sqlite") || filename.startsWith("browser-actions.sqlite")) continue;
     try {
       await rm(dataPath(filename), { force: false });
       removed.push(filename);

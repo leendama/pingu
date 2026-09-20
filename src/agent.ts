@@ -38,6 +38,9 @@ import { temporalInstructions } from "./time-context.js";
 import { PersonalState } from "./personal-state.js";
 import { emailAlertMode } from "./email-alert-policy.js";
 import { presentCalendarEvent, type CalendarEventData } from "./capabilities/calendar.js";
+import { BrowserActions } from "./browser-actions.js";
+import { nativeFormBrowser } from "./browser-port.js";
+import { browserPlugin } from "./capabilities/browser.js";
 
 export function agentInstructions(settings: RuntimeSettings, pluginInstructions: string[]): string {
   return [
@@ -155,10 +158,13 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const proposalLedger = new ProposalLedger();
   const workflowRuns = new WorkflowRuns();
   const personalState = new PersonalState();
+  const browserOrigins=(process.env.PINGU_BROWSER_ALLOWED_ORIGINS??"").split(",").map(s=>s.trim()).filter(Boolean);
+  const browserActions=browserOrigins.length ? new BrowserActions(nativeFormBrowser(browserOrigins)) : undefined;
+  browserActions?.recoverInterrupted();
   const legacyProposals = proposalLedger.invalidateLegacyEmailReplyProposals();
   if (legacyProposals) console.log("Invalidated legacy email proposals after the outcome-classification upgrade:", legacyProposals);
   const stopOwnerRemoval = onOwnerRemoved(async (owner) => {
-    if (owner.spaceId) { workflowRuns.forget(owner.spaceId); proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); }
+    if (owner.spaceId) { browserActions?.forget(owner.spaceId); workflowRuns.forget(owner.spaceId); proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); }
   });
   const structuredReviewer = {
     call: async (prompt: string, tool: import("openai/resources/responses/responses").Tool): Promise<Record<string, unknown>> => {
@@ -241,7 +247,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   });
 
   const registry = new PluginRegistry([
-    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: (spaceId) => workflowRuns.forget(spaceId), webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
+    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: (spaceId) => { workflowRuns.forget(spaceId); browserActions?.forget(spaceId); }, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
+    ...(browserActions ? [browserPlugin(browserActions,sendToSpace)] : []),
     workflowRunsPlugin(workflowRuns, proposalLedger),
     ...await loadCommunityPlugins(),
   ]);
@@ -338,8 +345,10 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     guestMaxInboundChars: settings.guest.maxInboundChars,
     guestDisclosure: firstContactDisclosure(settings.assistantName, settings.ownerName),
     recordOwnerSpace,
-    resolveProposalCommand: settings.chiefOfStaff.enabled
-      ? ({ texts, spaceId }) => handleProposalCommand({
+    resolveProposalCommand: async ({ texts, spaceId }) => {
+      const browserReply=await browserActions?.command(spaceId,texts);
+      if(browserReply!==undefined) return browserReply;
+      return settings.chiefOfStaff.enabled ? handleProposalCommand({
           ledger: proposalLedger,
           gmail,
           calendar,
@@ -347,8 +356,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
           texts,
           timezone: settings.timezone,
           runHistoryImport: (proposal) => chiefOfStaff.importHistory(proposal),
-        })
-      : undefined,
+        }) : undefined;
+    },
     resolveChiefInterview: settings.chiefOfStaff.enabled
       ? ({ texts, spaceId }) => Promise.resolve(handleChiefInterview(proposalLedger, spaceId, texts))
       : undefined,
@@ -408,6 +417,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       stopInterruptedApprovals();
       await messageQueue.drain();
       proposalLedger.close();
+      browserActions?.close();
     }
   })();
 

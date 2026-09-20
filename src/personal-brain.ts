@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** Bounded Markdown-only access. Hidden directories and symlinks are never sources. */
 export class PersonalBrain {
@@ -24,9 +24,46 @@ export class PersonalBrain {
     const content = await readFile(path, "utf8");
     return { path: name, source: `obsidian://open?path=${encodeURIComponent(path)}`, content: content.slice(0, 16_000), truncated: content.length > 16_000 };
   }
+  /** Explicit outgoing links only. A graph edge is not proof of a thematic claim. */
+  async links(name: string) {
+    const note = await this.read(name);
+    const root = await realpath(this.root);
+    const paths: string[] = [];
+    let directories = 0;
+    const walk = async (dir: string, depth = 0): Promise<void> => {
+      if (depth > 12 || directories++ >= 1000) return;
+      for (const e of await readdir(dir, { withFileTypes: true })) {
+        if (paths.length >= 3000) return;
+        if (e.name.startsWith(".") || e.isSymbolicLink()) continue;
+        const p = join(dir, e.name);
+        if (e.isDirectory()) await walk(p, depth + 1);
+        else if (e.isFile() && e.name.endsWith(".md")) paths.push(relative(root, p));
+      }
+    };
+    await walk(root);
+    const targets = [...note.content.matchAll(/\[\[([^\]\n]+)\]\]/g)].map(m => ({ target: m[1]!.split("|")[0]!.split("#")[0]!.trim(), wiki: true }));
+    targets.push(...[...note.content.matchAll(/\[[^\]\n]*\]\(([^)\s]+)\)/g)].map(m => ({ target: m[1]!.split("#")[0]!, wiki: false })));
+    const links = [];
+    for (const { target, wiki } of targets.slice(0, 50)) {
+      if (!target || /^[a-z][a-z\d+.-]*:/i.test(target)) continue;
+      let decoded: string;
+      try { decoded = decodeURIComponent(target); } catch { continue; }
+      const md = decoded.endsWith(".md") ? decoded : `${decoded}.md`;
+      const rel = relative(root, resolve(root, dirname(name), md));
+      const exact = wiki && paths.includes(md) ? md : paths.includes(rel) ? rel : undefined;
+      const candidates = exact ? [exact] : wiki && !md.includes("/") ? paths.filter(p => basename(p) === md) : [];
+      if (candidates.length !== 1) { links.push({ target, status: candidates.length ? "ambiguous" : "missing" }); continue; }
+      try {
+        const linked = await this.read(candidates[0]!);
+        links.push({ target, status: "resolved", path: linked.path, source: linked.source, excerpt: linked.content.slice(0, 1000), truncated: linked.content.length > 1000 || linked.truncated });
+      } catch { links.push({ target, status: "unavailable" }); }
+    }
+    return { source: note.source, links, limited: paths.length >= 3000 || directories >= 1000 || targets.length > 50 || note.truncated, note: "Explicit note links only, not verified conceptual relationships. Read each full note before claiming a connection. Missing and ambiguous links must not be guessed." };
+  }
   async search(query: string) {
     const root = await realpath(this.root);
-    const terms = query.toLowerCase().match(/[\p{L}\p{N}]+/gu)?.filter((s) => s.length > 1).slice(0, 10) ?? [];
+    const stop = new Set(["the", "and", "with", "what", "about", "from", "for", "does", "have", "into"]);
+    const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}]+/gu)?.filter((s) => s.length > 1 && !stop.has(s)) ?? [])].slice(0, 10);
     if (!terms.length) throw new Error("Search needs a person, concept, or project name.");
     const hits: Array<{ path: string; source: string; excerpt: string; score: number }> = [];
     let scanned = 0;
@@ -43,7 +80,10 @@ export class PersonalBrain {
         if ((await lstat(path)).size > 256_000) continue;
         const text = (await readFile(path, "utf8")).slice(0, 64_000);
         const lower = text.toLowerCase();
-        const score = terms.reduce((n, t) => n + (lower.includes(t) ? 1 : 0) + (entry.name.toLowerCase().includes(t) ? 2 : 0), 0);
+        const words = new Set(lower.match(/[\p{L}\p{N}]+/gu) ?? []);
+        const titleWords = new Set(entry.name.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+        const matched = terms.filter(t => words.has(t) || titleWords.has(t));
+        const score = matched.length * 2 + matched.filter(t => titleWords.has(t)).length * 3 + (matched.length === terms.length ? 3 : 0);
         if (!score) continue;
         const lines = text.split("\n");
         const index = lines.findIndex((line) => terms.some((t) => line.toLowerCase().includes(t)));

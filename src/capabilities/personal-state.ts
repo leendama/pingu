@@ -3,8 +3,8 @@ import type { PersonalState } from "../personal-state.js";
 import { capabilityPlugin } from "../tools.js";
 
 const taskInput = z.object({ id: z.string().nullable(), summary: z.string().min(1).max(500), context: z.string().max(2000), question: z.string().max(500), status: z.enum(["active", "waiting", "completed", "cancelled"]) });
-const commitmentInput = z.object({ summary: z.string().min(1).max(500), counterparty: z.string().min(1).max(200), owedBy: z.enum(["owner", "other"]), source: z.string().min(1).max(1500) });
-const statusInput = z.object({ id: z.string(), status: z.enum(["open", "reply_sent", "completed", "dismissed"]) });
+const commitmentInput = z.object({ summary: z.string().min(1).max(500), counterparty: z.string().min(1).max(200), owedBy: z.enum(["owner", "other"]), source: z.string().min(1).max(1500), evidence: z.object({ kind: z.enum(["owner_statement", "source_excerpt"]), quote: z.string().min(1).max(1500) }), dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable() });
+const statusInput = z.object({ id: z.string(), status: z.enum(["open", "reply_sent", "completed", "dismissed"]), source: z.string().min(1).max(1500), reason: z.string().min(1).max(500) });
 const listInput = z.object({ include_closed: z.boolean() });
 const fn = (name: string, description: string, schema: z.ZodType) => ({ type: "function" as const, name, description, strict: true, parameters: z.toJSONSchema(schema) });
 
@@ -16,7 +16,7 @@ export function personalStatePlugin(state: PersonalState) {
     { schema: fn("save_task_checkpoint", "Save or update this chat's unfinished task before asking a question. Null id creates a task. No actions are executed.", taskInput), safeAfterUntrusted: true, run: async (args, c) => { const v = taskInput.parse(args); return { output: JSON.stringify(await state.saveTask(c.spaceId, { ...v, id: v.id ?? undefined })) }; } },
     { schema: fn("list_task_checkpoints", "Read this chat's active or waiting tasks.", z.object({})), sideEffecting: false, untrustedSource: true, run: async (_a, c) => ({ output: JSON.stringify(await state.tasks(c.spaceId)) }) },
     { schema: fn("list_commitments", "List recorded commitments. Email reply status is reconciled periodically; check the source before acting. Include closed items to see sent replies.", listInput), sideEffecting: false, untrustedSource: true, run: async (a, c) => ({ output: JSON.stringify(await state.commitments(c.spaceId, listInput.parse(a).include_closed)) }) },
-    { schema: fn("save_commitment", "Record an explicitly agreed obligation and its source. Does not send, schedule, or notify.", commitmentInput), safeAfterUntrusted: true, run: async (a, c) => ({ output: JSON.stringify(await state.saveCommitment(c.spaceId, commitmentInput.parse(a))) }) },
-    { schema: fn("update_commitment", "Update a recorded commitment only on owner confirmation or verified source evidence.", statusInput), run: async (a, c) => { const v = statusInput.parse(a); return { output: JSON.stringify(await state.setStatus(c.spaceId, v.id, v.status)) }; } },
+    { schema: fn("save_commitment", "Record an explicitly agreed obligation with its source and exact supporting quote. Due date null unless explicit and unambiguous. Evidence is a recorded claim, not independent verification. Does not send, schedule, or notify.", commitmentInput), safeAfterUntrusted: true, run: async (a, c) => { const v = commitmentInput.parse(a); return { output: JSON.stringify(await state.saveCommitment(c.spaceId, { ...v, dueDate: v.dueDate ?? undefined })) }; } },
+    { schema: fn("update_commitment", "Update a recorded commitment only on owner confirmation or verified source evidence. Record the source and reason; a sent reply is not proof of completed work.", statusInput), run: async (a, c) => { const v = statusInput.parse(a); return { output: JSON.stringify(await state.setStatus(c.spaceId, v.id, v.status, { source: v.source, reason: v.reason })) }; } },
   ]);
 }

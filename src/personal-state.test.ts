@@ -25,7 +25,7 @@ describe("personal reference state", () => {
     const state = new PersonalState();
     await state.trackEmail("owner", message, "review proposal", "person@example.test");
     const [first] = await state.commitments("owner");
-    await state.setStatus("owner", first!.id, "dismissed");
+    await state.setStatus("owner", first!.id, "dismissed", { source: "owner message", reason: "Owner said no reply needed." });
     await state.trackEmail("owner", message, "review proposal", "person@example.test");
     expect(await state.commitments("owner")).toEqual([]);
     await state.trackEmail("owner", { ...message, id: "in-2", receivedAt: "2026-08-02T09:00:00Z" }, "a new question", "person@example.test");
@@ -67,4 +67,13 @@ describe("personal reference state", () => {
     await state.forget("owner");
     expect(await state.commitments("owner", true)).toEqual([]);
   });
+});
+
+it("persists status evidence, keeps reply separate from completion, and isolates changes",async()=>{
+ const state=new PersonalState();
+ const c=await state.saveCommitment("owner",{summary:"send results",counterparty:"Alex",owedBy:"owner",source:"note-1",evidence:{kind:"source_excerpt",quote:"I will send results"},dueDate:"2029-02-09"});
+ await expect(state.setStatus("other",c.id,"completed",{source:"note-2",reason:"confirmed"})).rejects.toThrow(/not found/);
+ await expect(state.setStatus("owner",c.id,"completed",{source:"",reason:""})).rejects.toThrow();
+ await state.setStatus("owner",c.id,"completed",{source:"owner confirmation",reason:"results delivered"});
+ expect(await new PersonalState().commitments("owner",true)).toMatchObject([{status:"completed",evidence:{quote:"I will send results"},history:[{reason:"results delivered"}]}]);
 });

@@ -43,3 +43,17 @@ describe("private brain", () => {
     }
   });
 });
+
+it("follows explicit links and refuses ambiguous title matches", async () => {
+ await mkdir(join(dir,"principles")); await mkdir(join(dir,"lessons"));
+ await writeFile(join(dir,"meeting.md"),"[[principles/test|test first]] [[same]] [[missing]] [lesson](lessons/review.md)");
+ await writeFile(join(dir,"principles/test.md"),"# Test first\nEvidence before launch.");
+ await writeFile(join(dir,"principles/same.md"),"one"); await writeFile(join(dir,"lessons/same.md"),"two");
+ await writeFile(join(dir,"lessons/review.md"),"Review the evidence.");
+ const result=await new PersonalBrain(dir).links("meeting.md");
+ expect(result.links).toMatchObject([{status:"resolved",path:"principles/test.md"},{status:"ambiguous"},{status:"missing"},{status:"resolved",path:"lessons/review.md"}]);
+});
+it("does not match a person's name as a substring of a different word", async()=>{
+ await writeFile(join(dir,"discussion.md"),"A shimmering opportunity");
+ expect((await new PersonalBrain(dir).search("mer")).hits).toEqual([]);
+});

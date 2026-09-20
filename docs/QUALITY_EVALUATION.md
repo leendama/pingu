@@ -1,0 +1,13 @@
+# Quality evaluation and evidence memory
+
+`npm run eval:quality -- /absolute/path/report.json` loads the normal runtime configuration and calls the configured model. It does not start Spectrum, send messages, create drafts, or write calendars. Reports are mode 0600. Keep reports outside the public repository when adapting fixtures to personal material.
+
+The live smoke suite covers meeting preparation, meeting follow-through, real primary-source web research, publication dates, and an unavailable page. Neutral meeting evidence contains an explicit promise, an unagreed suggestion, an unresolved decision, a linked principle, and an injected instruction. Checks assess length, attribution, citations, missing-page honesty, and rejection of the planted instruction. Review the saved outputs manually: regex checks cannot prove every claim or citation is sound. They are not a representative benchmark, a private-conversation audit, or evidence that every stale or conflicting source is detected. Paid live evaluations are opt-in and do not run in CI.
+
+Offline tests cover authority boundaries, read checkpoints, one bounded shortening attempt, status evidence, link ambiguity, DST recurrence, approval versioning, and uncertain-write suppression. Browser integration tests run a local fixture in Chromium, including a malicious page script, form-state changes, and exact submission. `npm run test:browser` requires `npx playwright install chromium`; CI installs Chromium separately.
+
+## Commitments and note retrieval
+
+New model-recorded commitments require an exact supporting excerpt and source, an attributed obligor, and an explicit date or null. These are recorded evidence claims, not independently verified facts. Legacy records remain readable. Status changes require a source and reason and retain the latest 30 transitions. Email reconciliation records the sent message ID and marks only `reply_sent`; it cannot prove a promised deliverable completed. A newer inbound request reopens the reply obligation while preserving its transition history.
+
+Brain search matches whole words and boosts title and multi-term matches; this avoids name substrings matching unrelated words. `list_personal_note_links` follows explicit wiki and relative Markdown links. Unique exact paths resolve; ambiguous note titles and missing targets remain unresolved. Hidden directories and symlinks remain excluded. Search and link scans are bounded and disclose truncation. Retrieved excerpts and edges are candidates: read the full sources before claiming a thematic connection. The feature does not rewrite notes or automatically manufacture graph links.

@@ -31,3 +31,17 @@ it("resumes from saved read evidence instead of starting the model input over",a
  expect(await execute({...run,checkpoint:JSON.stringify({input,rounds:1,reads:1})},vi.fn())).toBe("Saved evidence summary");
  expect(create.mock.calls[0]![0].input).toEqual(input);
 });
+
+it("shortens an oversized result once without giving the repair turn tools",async()=>{
+ const create=vi.fn().mockResolvedValueOnce({status:"completed",output:[{type:"message",content:[{type:"output_text",text:"word ".repeat(101)}]}]}).mockResolvedValueOnce({status:"completed",output:[{type:"message",content:[{type:"output_text",text:"Alex owes results. Source: note-1."}]}]});
+ const execute=workflowExecutor({responses:{create}} as unknown as Pick<OpenAI,"responses">,new PluginRegistry([plugin()]),"configured-model","UTC",true);
+ expect(await execute(run,vi.fn())).toContain("Source: note-1");
+ expect(create.mock.calls[1]![0].tools).toEqual([]);
+});
+
+it("refuses delivery if the shortening attempt is still too long",async()=>{
+ const create=vi.fn().mockResolvedValue({status:"completed",output:[{type:"message",content:[{type:"output_text",text:"word ".repeat(101)}]}]});
+ const execute=workflowExecutor({responses:{create}} as unknown as Pick<OpenAI,"responses">,new PluginRegistry([plugin()]),"configured-model","UTC",true);
+ await expect(execute(run,vi.fn())).rejects.toThrow(/concise output/);
+ expect(create).toHaveBeenCalledTimes(2);
+});

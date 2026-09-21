@@ -2,7 +2,7 @@ import type { PinguPlugin } from "../plugins.js";
 import { capabilityPlugin, numberValue, stringValue } from "../tools.js";
 
 export interface GranolaPort {
-  listNotes(options: { createdAfter?: string; createdBefore?: string; pageSize: number }): Promise<unknown>;
+  listNotes(options: { createdAfter?: string; createdBefore?: string; updatedAfter?: string; cursor?: string; pageSize: number }): Promise<unknown>;
   getNote(noteId: string, includeTranscript: boolean): Promise<unknown>;
 }
 

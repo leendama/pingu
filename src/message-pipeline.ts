@@ -266,6 +266,7 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       senderId,
       space,
       message,
+      currentSenderText: directTexts.join("\n"),
       richResponseSent: false,
       confirmedEmailDraftId: confirmation.confirmedDraftId,
       confirmedActionKey: action.confirmedActionKey,

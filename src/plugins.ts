@@ -13,6 +13,8 @@ export interface ToolRunContext {
   senderId?: string;
   space: Space;
   message: Message;
+  /** Direct text from this sender's current batch, excluding quoted reply targets. */
+  currentSenderText?: string;
   sendVoice: (text: string) => Promise<void>;
   richResponseSent: boolean;
   draftForReview?: string;

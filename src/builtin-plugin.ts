@@ -32,7 +32,7 @@ export interface BuiltInOptions {
   personalState?: PersonalState;
   vaultPath?: string;
   webResearch?: WebResearchPort;
-  forgetWorkflows?: (spaceId: string) => void;
+  forgetWorkflows?: (spaceId: string) => void | Promise<void>;
 }
 
 export function builtInPlugins(
@@ -52,7 +52,7 @@ export function builtInPlugins(
     personalStatePlugin(personalState),
     ...(options.webResearch ? [webResearchPlugin(options.webResearch)] : []),
     ...(options.vaultPath ? [personalBrainPlugin(options.vaultPath)] : []),
-    privacyPlugin({ forget: async (spaceId) => { await forgetTranscript(spaceId); await personalState.forget(spaceId); options.forgetWorkflows?.(spaceId); } }),
+    privacyPlugin({ forget: async (spaceId) => { await forgetTranscript(spaceId); await personalState.forget(spaceId); await options.forgetWorkflows?.(spaceId); } }),
     ...(options.proposalLedger ? [workflowsPlugin(options.proposalLedger)] : []),
     ...(options.scheduling
       ? [schedulingPlugin(options.scheduling, {

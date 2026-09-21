@@ -41,6 +41,12 @@ import { presentCalendarEvent, type CalendarEventData } from "./capabilities/cal
 import { BrowserActions } from "./browser-actions.js";
 import { nativeFormBrowser } from "./browser-port.js";
 import { browserPlugin } from "./capabilities/browser.js";
+import { MeetingOutcomes,promptForMeetingOutcomes } from "./meeting-outcomes.js";
+import { MeetingNotes,linkMeetingBrief } from "./meeting-notes.js";
+import { meetingOutcomesPlugin } from "./capabilities/meeting-outcomes.js";
+import { meetingReviewPoller,modelMeetingReviewer } from "./meeting-review.js";
+import { PersonalBrain } from "./personal-brain.js";
+import { granolaPort } from "./granola.js";
 
 export function agentInstructions(settings: RuntimeSettings, pluginInstructions: string[]): string {
   return [
@@ -158,13 +164,16 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const proposalLedger = new ProposalLedger();
   const workflowRuns = new WorkflowRuns();
   const personalState = new PersonalState();
+  const meetingOutcomes=new MeetingOutcomes();
+  const meetingVault=process.env.PINGU_MEETING_OUTCOMES==="true" ? process.env.PINGU_VAULT_PATH : undefined;
+  const meetingNotes=meetingVault ? new MeetingNotes(meetingVault,settings.timezone) : undefined;
   const browserOrigins=(process.env.PINGU_BROWSER_ALLOWED_ORIGINS??"").split(",").map(s=>s.trim()).filter(Boolean);
   const browserActions=browserOrigins.length ? new BrowserActions(nativeFormBrowser(browserOrigins)) : undefined;
   browserActions?.recoverInterrupted();
   const legacyProposals = proposalLedger.invalidateLegacyEmailReplyProposals();
   if (legacyProposals) console.log("Invalidated legacy email proposals after the outcome-classification upgrade:", legacyProposals);
   const stopOwnerRemoval = onOwnerRemoved(async (owner) => {
-    if (owner.spaceId) { browserActions?.forget(owner.spaceId); workflowRuns.forget(owner.spaceId); proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); }
+    if (owner.spaceId) { browserActions?.forget(owner.spaceId); workflowRuns.forget(owner.spaceId); proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); await meetingOutcomes.forget(owner.spaceId); }
   });
   const structuredReviewer = {
     call: async (prompt: string, tool: import("openai/resources/responses/responses").Tool): Promise<Record<string, unknown>> => {
@@ -247,7 +256,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   });
 
   const registry = new PluginRegistry([
-    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: (spaceId) => { workflowRuns.forget(spaceId); browserActions?.forget(spaceId); }, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
+    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: async (spaceId) => { workflowRuns.forget(spaceId); browserActions?.forget(spaceId); await meetingOutcomes.forget(spaceId); }, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
+    ...(meetingNotes ? [meetingOutcomesPlugin(meetingOutcomes,calendar,meetingNotes)] : []),
     ...(browserActions ? [browserPlugin(browserActions,sendToSpace)] : []),
     workflowRunsPlugin(workflowRuns, proposalLedger),
     ...await loadCommunityPlugins(),
@@ -261,11 +271,21 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     await reconcileActions(proposalLedger, gmail, calendar, await ownerSpaceIds());
   });
   const instructions = agentInstructions(settings, registry.instructions);
+  const stopMeetingPrompts=meetingNotes ? startPoller("Meeting outcome prompts",60_000,async()=>{
+    await promptForMeetingOutcomes(meetingOutcomes,{calendar,owners:ownerSpaceIds,timezone:settings.timezone,deliver:(owner,text)=>deliverToOwner(proactive,owner,text),existingOutcomes:async(event,owner)=>{
+      const existing=await meetingNotes.existing(event.id!,event.extendedProperties?.private?.pinguMeetingBrief);
+      if(!existing) return false;
+      await meetingOutcomes.update(owner,event.id!,{...existing,capturedAt:new Date().toISOString(),calendarLinked:event.extendedProperties?.private?.pinguMeetingBrief===existing.briefSource});return true;
+    }});
+    for(const owner of await ownerSpaceIds()) for(const m of (await meetingOutcomes.list(owner)).filter(m=>m.briefSource&&!m.calendarLinked&&Date.parse(m.end)>Date.now()-7*86400_000).slice(0,5)) await linkMeetingBrief(meetingOutcomes,calendar,m);
+  }):()=>undefined;
+  const outcomeReviewer=modelMeetingReviewer(client,settings.model,kind==="openai");
+  const stopMeetingReviews=meetingNotes&&meetingVault&&settings.granolaApiKey ? startPoller("Meeting outcome reviews",10*60_000,meetingReviewPoller({store:meetingOutcomes,calendar,granola:granolaPort(settings.granolaApiKey),notes:meetingNotes,brain:new PersonalBrain(meetingVault),reviewer:outcomeReviewer,owners:ownerSpaceIds,timezone:settings.timezone})):()=>undefined;
 
   const generateReply = createReplyGenerator({
     respond: async (input, context) => client.responses.create({
       model: settings.model,
-      instructions: `${instructions}\n${turnInstructions(settings, context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}${context.role === "owner" && !context.isGroup ? workflowRuns.context(context.spaceId) : ""}${context.role === "owner" && !context.isGroup ? await personalState.context(context.spaceId) : ""}\n${temporalInstructions(settings.timezone)}`,
+      instructions: `${instructions}\n${turnInstructions(settings, context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}${context.role === "owner" && !context.isGroup ? workflowRuns.context(context.spaceId) : ""}${context.role === "owner" && !context.isGroup ? await personalState.context(context.spaceId) : ""}${meetingNotes&&context.role==="owner"&&!context.isGroup ? await meetingOutcomes.context(context.spaceId):""}\n${temporalInstructions(settings.timezone)}`,
       input,
       tools: registry.toolsFor(context),
       ...(context.role === "guest" ? { max_output_tokens: settings.guest.maxOutputTokens } : {}),
@@ -403,6 +423,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       if (!stopping) throw new Error("The Spectrum message stream ended unexpectedly.");
     } finally {
       stopWorkflowRuns();
+      stopMeetingPrompts();
+      stopMeetingReviews();
       stopActionReconciliation();
       stopReminders();
       stopEmailAlerts();
@@ -426,6 +448,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     stop: async () => {
       stopping = true;
       stopWorkflowRuns();
+      stopMeetingPrompts();
+      stopMeetingReviews();
       stopActionReconciliation();
       stopReminders();
       stopEmailAlerts();

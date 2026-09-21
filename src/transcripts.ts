@@ -186,6 +186,7 @@ export async function deleteAllTranscripts(): Promise<number> {
 
 /** Every file Pingu writes under the data directory, other than encrypted credentials. */
 export const PINGU_DATA_FILES = [
+  "meeting-outcomes.json",
   "conversations.json",
   "reminders.json",
   "pending-emails.json",

@@ -1,6 +1,6 @@
 import type { ProposalLedger } from "./proposals.js";
 
-export const WORKFLOW_READ_TOOLS = ["get_current_time", "search_gmail", "read_gmail_message", "search_calendar", "read_calendar_event", "list_granola_notes", "get_granola_note", "search_personal_brain", "read_personal_note", "list_personal_note_links", "list_commitments", "list_meeting_outcomes", "list_task_checkpoints", "search_web", "read_web_page"] as const;
+export const WORKFLOW_READ_TOOLS = ["get_current_time", "search_gmail", "read_gmail_message", "search_calendar", "read_calendar_event", "list_granola_notes", "get_granola_note", "search_personal_brain", "read_personal_note", "list_personal_note_links", "list_commitments", "list_meeting_outcomes", "list_priority_reviews", "review_priorities", "list_task_checkpoints", "search_web", "read_web_page"] as const;
 export type WorkflowReadTool = typeof WORKFLOW_READ_TOOLS[number];
 
 export interface WorkflowDefinition {
@@ -31,10 +31,10 @@ export const DEFAULT_WORKFLOWS: WorkflowDefinition[] = [
   },
   {
     id: "builtin-direction-review", name: "direction review", createdAt: "builtin",
-    jobDescription: "Review learning and career direction against the owner's current written priorities and recent conversation evidence. First find and read the current priorities or thesis guide in the vault, then retrieve relevant recent evidence. Ask if the current priorities cannot be found.",
+    jobDescription: "Review learning and career direction against the owner's current written priorities and recent conversation evidence. First use review_priorities to read the owner's explicitly selected current priorities and compare upcoming commitments. If no source is selected, ask which note is current; do not infer it from search rankings. Then retrieve relevant recent evidence.",
     context: "Identify a repeated signal only with multiple independent source examples. Distinguish interest from career fit, possibility from commitment, and a contained obligation from a new project. Assess which current work a proposed course or project would displace. Do not invent the owner's values or promote an observation to a settled principle.",
     outputFormat: "At most 180 words: up to two source-backed signals, the strongest uncertainty, and one small suggested next step tied to an existing priority. Include dates and sources. No calendar changes or new obligations.",
-    allowedTools: ["search_personal_brain", "read_personal_note", "list_personal_note_links", "list_commitments", "list_meeting_outcomes", "search_calendar"],
+    allowedTools: ["search_personal_brain", "read_personal_note", "list_personal_note_links", "list_commitments", "list_meeting_outcomes", "search_calendar", "review_priorities", "list_priority_reviews"],
   },
 ];
 

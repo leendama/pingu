@@ -1,3 +1,5 @@
+import { PriorityReviews,priorityReviewRunner,priorityReviewPoller,modelPriorityReviewer } from "./priority-review.js";
+import { priorityReviewPlugin } from "./capabilities/priority-review.js";
 import { emailCommitmentPoller, nudgeDueCommitments, captureMeetingCommitments } from "./commitment-follow-through.js";
 import { reconcileActions } from "./action-reconciliation.js";
 import { WorkflowRuns, tickWorkflowRuns } from "./workflow-runs.js";
@@ -165,6 +167,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const proposalLedger = new ProposalLedger();
   const workflowRuns = new WorkflowRuns();
   const personalState = new PersonalState();
+  const priorityReviews=new PriorityReviews();
   const meetingOutcomes=new MeetingOutcomes();
   const meetingVault=process.env.PINGU_MEETING_OUTCOMES==="true" ? process.env.PINGU_VAULT_PATH : undefined;
   const meetingNotes=meetingVault ? new MeetingNotes(meetingVault,settings.timezone) : undefined;
@@ -174,7 +177,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const legacyProposals = proposalLedger.invalidateLegacyEmailReplyProposals();
   if (legacyProposals) console.log("Invalidated legacy email proposals after the outcome-classification upgrade:", legacyProposals);
   const stopOwnerRemoval = onOwnerRemoved(async (owner) => {
-    if (owner.spaceId) { browserActions?.forget(owner.spaceId); workflowRuns.forget(owner.spaceId); proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); await meetingOutcomes.forget(owner.spaceId); }
+    if (owner.spaceId) { browserActions?.forget(owner.spaceId); workflowRuns.forget(owner.spaceId); proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); await meetingOutcomes.forget(owner.spaceId); await priorityReviews.forget(owner.spaceId); }
   });
   const structuredReviewer = {
     call: async (prompt: string, tool: import("openai/resources/responses/responses").Tool): Promise<Record<string, unknown>> => {
@@ -256,8 +259,13 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     send: sendToSpace,
   });
 
+  const priorityBrain=process.env.PINGU_VAULT_PATH ? new PersonalBrain(process.env.PINGU_VAULT_PATH) : undefined;
+  const runPriorityReview=priorityBrain ? priorityReviewRunner({store:priorityReviews,brain:priorityBrain,calendar,state:personalState,timezone:settings.timezone,owners:ownerSpaceIds,reviewer:modelPriorityReviewer(client,settings.model,kind==="openai")}):undefined;
+  const stopPriorityReviews=runPriorityReview&&process.env.PINGU_PRIORITY_REVIEWS==="true" ? startPoller("Priority reviews",10*60_000,priorityReviewPoller({store:priorityReviews,owners:ownerSpaceIds,timezone:settings.timezone,run:runPriorityReview})):()=>undefined;
+
   const registry = new PluginRegistry([
-    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: async (spaceId) => { workflowRuns.forget(spaceId); browserActions?.forget(spaceId); await meetingOutcomes.forget(spaceId); }, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
+    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: async (spaceId) => { workflowRuns.forget(spaceId); browserActions?.forget(spaceId); await meetingOutcomes.forget(spaceId); await priorityReviews.forget(spaceId); }, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
+    ...(priorityBrain&&runPriorityReview ? [priorityReviewPlugin(priorityReviews,priorityBrain,runPriorityReview)] : []),
     ...(meetingNotes ? [meetingOutcomesPlugin(meetingOutcomes,calendar,meetingNotes)] : []),
     ...(browserActions ? [browserPlugin(browserActions,sendToSpace)] : []),
     workflowRunsPlugin(workflowRuns, proposalLedger),
@@ -432,6 +440,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       if (!stopping) throw new Error("The Spectrum message stream ended unexpectedly.");
     } finally {
       stopWorkflowRuns();
+      stopPriorityReviews();
       stopCommitmentCapture();
       stopCommitmentNudges();
       stopMeetingPrompts();
@@ -459,6 +468,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     stop: async () => {
       stopping = true;
       stopWorkflowRuns();
+      stopPriorityReviews();
       stopCommitmentCapture();
       stopCommitmentNudges();
       stopMeetingPrompts();

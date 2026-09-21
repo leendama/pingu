@@ -17,16 +17,18 @@ const commitmentSchema = z.object({
   receivedAt: z.string().optional(), updatedAt: z.string(),
   lastCheckedAt: z.string().optional(),
   evidence: z.object({ kind: z.enum(["owner_statement", "source_excerpt", "email_reply_request"]), quote: z.string().min(1).max(1500) }).optional(),
+  sourceKey: z.string().optional(), captureKind: z.enum(["automatic", "owner"]).default("owner"),
+  nudgedDueDate: z.string().optional(),
   dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   history: z.array(z.object({ status: z.enum(["open", "reply_sent", "completed", "dismissed"]), at: z.string(), source: z.string().min(1).max(1500), reason: z.string().min(1).max(500) })).default([]),
 });
 export type ActiveTask = z.infer<typeof taskSchema>;
 export type Commitment = z.infer<typeof commitmentSchema>;
-const schema = z.object({ tasks: z.array(taskSchema), commitments: z.array(commitmentSchema) });
+const schema = z.object({ tasks: z.array(taskSchema), commitments: z.array(commitmentSchema), capturedSources: z.array(z.object({spaceId:z.string(),key:z.string()})).default([]) });
 
 /** Reference memory only: it never grants permission or executes a queued action. */
 export class PersonalState {
-  private readonly store = new JsonFileStore("personal-state.json", () => ({ tasks: [], commitments: [] } as z.infer<typeof schema>), (v) => schema.parse(v));
+  private readonly store = new JsonFileStore("personal-state.json", () => ({ tasks: [], commitments: [], capturedSources: [] } as z.infer<typeof schema>), (v) => schema.parse(v));
   async tasks(spaceId: string) {
     return (await this.store.read()).tasks.filter((t) => t.spaceId === spaceId && ["active", "waiting"].includes(t.status))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5);
@@ -47,9 +49,9 @@ export class PersonalState {
     return (await this.store.read()).commitments.filter((c) => c.spaceId === spaceId && (includeClosed || c.status === "open"))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 100);
   }
-  async saveCommitment(spaceId: string, input: Pick<Commitment, "summary" | "counterparty" | "owedBy" | "source"> & Partial<Pick<Commitment, "evidence" | "dueDate">>) {
+  async saveCommitment(spaceId: string, input: Pick<Commitment, "summary" | "counterparty" | "owedBy" | "source"> & Partial<Pick<Commitment, "evidence" | "dueDate" | "sourceKey" | "captureKind">>) {
     // Identical repeated captures are idempotent; unrelated commitments stay separate.
-    const id = createHash("sha256").update(JSON.stringify([spaceId, input])).digest("hex").slice(0, 24);
+    const id = createHash("sha256").update(JSON.stringify(input.sourceKey ? [spaceId, input.sourceKey] : [spaceId, input])).digest("hex").slice(0, 24);
     return this.store.update((state) => {
       const existing = state.commitments.find((c) => c.id === id);
       if (existing) return { result: existing, changed: false };
@@ -58,6 +60,22 @@ export class PersonalState {
       return { result: item, changed: true };
     });
   }
+  async commitment(spaceId:string,id:string){return(await this.store.read()).commitments.find(c=>c.spaceId===spaceId&&c.id===id);}
+  async sourceCaptured(spaceId:string,key:string){return(await this.store.read()).capturedSources.some(s=>s.spaceId===spaceId&&s.key===key);}
+  async markSourceCaptured(spaceId:string,key:string){await this.store.update(s=>{
+    if(s.capturedSources.some(c=>c.spaceId===spaceId&&c.key===key)) return{result:undefined,changed:false};
+    s.capturedSources.push({spaceId,key});return{result:undefined,changed:true};
+  });}
+  async rescheduleCommitment(spaceId:string,id:string,dueDate:string|undefined){
+    if(dueDate && (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)||!Number.isFinite(Date.parse(dueDate))||new Date(dueDate).toISOString().slice(0,10)!==dueDate)) throw new Error("Use a valid explicit calendar date.");
+    return this.store.update(s=>{const c=s.commitments.find(c=>c.spaceId===spaceId&&c.id===id);if(!c) throw new Error("Commitment not found in this chat.");
+      c.dueDate=dueDate;c.updatedAt=new Date().toISOString();return{result:c,changed:true};});
+  }
+  async claimDueCommitments(spaceId:string,date:string){return this.store.update(s=>{
+    const due=s.commitments.filter(c=>c.spaceId===spaceId&&c.status==="open"&&c.dueDate===date&&c.nudgedDueDate!==date).slice(0,3);
+    for(const c of due)c.nudgedDueDate=date;
+    return{result:due,changed:due.length>0};
+  });}
   async setStatus(spaceId: string, id: string, status: Commitment["status"], evidence: { source: string; reason: string }) {
     const change = commitmentSchema.shape.history.unwrap().element.parse({ status, at: new Date().toISOString(), ...evidence });
     return this.store.update((state) => {
@@ -116,6 +134,6 @@ export class PersonalState {
     }
   }
   async forget(spaceId: string) {
-    await this.store.update((s) => { s.tasks = s.tasks.filter((t) => t.spaceId !== spaceId); s.commitments = s.commitments.filter((c) => c.spaceId !== spaceId); return { result: undefined, changed: true }; });
+    await this.store.update((s) => { s.tasks = s.tasks.filter((t) => t.spaceId !== spaceId); s.commitments = s.commitments.filter((c) => c.spaceId !== spaceId); s.capturedSources=s.capturedSources.filter(c=>c.spaceId!==spaceId); return { result: undefined, changed: true }; });
   }
 }

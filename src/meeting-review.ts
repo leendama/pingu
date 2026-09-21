@@ -47,7 +47,7 @@ export function renderOutcomeDigest(meeting:OutcomeMeeting,note:z.infer<typeof g
 }
 
 /** Read-only polling followed by a private, deterministic note write. Never sends messages. */
-export function meetingReviewPoller(deps:{store:MeetingOutcomes;calendar:CalendarPort;granola:GranolaPort;notes:MeetingNotes;brain:PersonalBrain;reviewer:StructuredReviewer;owners():Promise<string[]>;timezone?:string}){
+export function meetingReviewPoller(deps:{store:MeetingOutcomes;calendar:CalendarPort;granola:GranolaPort;notes:MeetingNotes;brain:PersonalBrain;reviewer:StructuredReviewer;owners():Promise<string[]>;timezone?:string;captureFollowUps?:(owner:string,note:z.infer<typeof granolaMeetingNote>,followUps:OutcomeAssessment["outcomes"][number]["followUps"])=>Promise<void>}){
   const cache=new Map<string,{version:string;note:unknown}>();
   return async(now=new Date())=>{
     const owners=await deps.owners();
@@ -83,6 +83,7 @@ export function meetingReviewPoller(deps:{store:MeetingOutcomes;calendar:Calenda
         await deps.store.update(current.owner,current.eventId,{assessmentKey:revision,assessmentJson:JSON.stringify(result)});
         if(!(await deps.owners()).includes(current.owner)||!(await deps.store.get(current.owner,current.eventId))) continue;
         const saved=await deps.notes.digest(`meeting-review-${meetingKey(current.owner,current.eventId)}.md`,renderOutcomeDigest(current,note,result,deps.timezone),current.digestHash);
+        await deps.captureFollowUps?.(current.owner,note,result.outcomes.flatMap(o=>o.followUps));
         await deps.store.update(current.owner,current.eventId,{digestPath:saved.path,digestHash:saved.hash,noteId:note.id,noteVersion:note.updated_at,lastError:undefined});
       }catch{await deps.store.update(meeting.owner,meeting.eventId,{lastError:"Outcome review could not be verified; no completed result claimed."});}
     }

@@ -1,3 +1,4 @@
+import { emailCommitmentPoller, nudgeDueCommitments, captureMeetingCommitments } from "./commitment-follow-through.js";
 import { reconcileActions } from "./action-reconciliation.js";
 import { WorkflowRuns, tickWorkflowRuns } from "./workflow-runs.js";
 import { workflowExecutor } from "./workflow-executor.js";
@@ -280,7 +281,15 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     for(const owner of await ownerSpaceIds()) for(const m of (await meetingOutcomes.list(owner)).filter(m=>m.briefSource&&!m.calendarLinked&&Date.parse(m.end)>Date.now()-7*86400_000).slice(0,5)) await linkMeetingBrief(meetingOutcomes,calendar,m);
   }):()=>undefined;
   const outcomeReviewer=modelMeetingReviewer(client,settings.model,kind==="openai");
-  const stopMeetingReviews=meetingNotes&&meetingVault&&settings.granolaApiKey ? startPoller("Meeting outcome reviews",10*60_000,meetingReviewPoller({store:meetingOutcomes,calendar,granola:granolaPort(settings.granolaApiKey),notes:meetingNotes,brain:new PersonalBrain(meetingVault),reviewer:outcomeReviewer,owners:ownerSpaceIds,timezone:settings.timezone})):()=>undefined;
+  const stopMeetingReviews=meetingNotes&&meetingVault&&settings.granolaApiKey ? startPoller("Meeting outcome reviews",10*60_000,meetingReviewPoller({store:meetingOutcomes,calendar,granola:granolaPort(settings.granolaApiKey),notes:meetingNotes,brain:new PersonalBrain(meetingVault),reviewer:outcomeReviewer,owners:ownerSpaceIds,timezone:settings.timezone,captureFollowUps:process.env.PINGU_COMMITMENT_CAPTURE==="true" ? (owner,note,items)=>captureMeetingCommitments(personalState,owner,settings.ownerName,note,items) : undefined})):()=>undefined;
+
+  const stopCommitmentCapture=process.env.PINGU_COMMITMENT_CAPTURE==="true" ? startPoller("Commitment capture",10*60_000,emailCommitmentPoller({state:personalState,gmail,owners:ownerSpaceIds,reviewer:{call:async(prompt,tool)=>{
+    const response=await client.responses.create({model:settings.model,input:prompt,tools:[tool],tool_choice:{type:"function",name:"record_email_commitments"},max_output_tokens:2500,...(kind==="openai"?{store:false}:{})},{timeout:60_000,maxRetries:0});
+    const call=response.output.find(i=>i.type==="function_call"&&i.name==="record_email_commitments");
+    if(response.status!=="completed"||!call||call.type!=="function_call") throw new Error("Commitment extraction incomplete.");
+    return JSON.parse(call.arguments) as Record<string,unknown>;
+  }}})):()=>undefined;
+  const stopCommitmentNudges=process.env.PINGU_COMMITMENT_NUDGES==="due" ? startPoller("Commitment nudges",60_000,()=>nudgeDueCommitments({state:personalState,owners:ownerSpaceIds,timezone:settings.timezone,deliver:(owner,text)=>deliverToOwner(proactive,owner,text)})):()=>undefined;
 
   const generateReply = createReplyGenerator({
     respond: async (input, context) => client.responses.create({
@@ -423,6 +432,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       if (!stopping) throw new Error("The Spectrum message stream ended unexpectedly.");
     } finally {
       stopWorkflowRuns();
+      stopCommitmentCapture();
+      stopCommitmentNudges();
       stopMeetingPrompts();
       stopMeetingReviews();
       stopActionReconciliation();
@@ -448,6 +459,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     stop: async () => {
       stopping = true;
       stopWorkflowRuns();
+      stopCommitmentCapture();
+      stopCommitmentNudges();
       stopMeetingPrompts();
       stopMeetingReviews();
       stopActionReconciliation();

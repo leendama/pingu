@@ -227,6 +227,15 @@ describe("message pipeline", () => {
     expect(notCalled).not.toHaveBeenCalled();
   });
 
+  it("records only delivered owner text and keeps feedback errors from undoing draft review",async()=>{
+    const deps=dependencies();const send=vi.fn(async()=>undefined);const observer=vi.fn(async()=>{throw new Error("disk unavailable");});
+    await createMessageProcessor({...deps,onOwnerTextDelivered:observer})(directSpace(send),inboundMessage());
+    expect(observer).toHaveBeenCalledOnce();expect(send).toHaveBeenCalledOnce();expect(deps.markEmailReviewed).toHaveBeenCalledOnce();
+    const failObserver=vi.fn();await createMessageProcessor({...dependencies(),onOwnerTextDelivered:failObserver})(directSpace(vi.fn(async()=>{throw new Error("failed send");})),inboundMessage());expect(failObserver).not.toHaveBeenCalled();
+    const guest=dependencies();guest.generateReply.mockImplementation(async()=>"hello");
+    await createMessageProcessor({...guest,onOwnerTextDelivered:failObserver})(directSpace(),inboundMessage("hello","guest"));expect(failObserver).not.toHaveBeenCalled();
+  });
+
   it("counts a rich response as a delivered reply", async () => {
     const deps = dependencies();
     deps.generateReply.mockImplementation(async (_spaceId, _text, context) => {

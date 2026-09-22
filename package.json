@@ -18,6 +18,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "check": "npm run typecheck && npm test && npm run build",
+    "eval:feedback": "tsx src/eval-feedback.ts",
     "eval:priorities": "tsx src/eval-priorities.ts",
     "eval:commitments": "tsx src/eval-commitments.ts",
     "eval:meetings": "tsx src/eval-meeting-outcomes.ts",

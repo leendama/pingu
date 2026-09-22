@@ -184,7 +184,7 @@ describe("chief of staff service", () => {
     ledger.close();
   });
 
-  it("predictably suppresses later mail from a contact the owner ignored", async () => {
+  it("dismisses one item without suppressing later mail from that contact", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pingu-chief-ignore-"));
     directories.push(directory);
     const ledger = new ProposalLedger(join(directory, "ledger.sqlite"));
@@ -193,10 +193,10 @@ describe("chief of staff service", () => {
     const gmail = { readMessage: async (id: string) => ({ id, threadId: id, labelIds: ["INBOX"], from: "Updates <updates@example.com>", subject: "A normal update", body: "Would you like to respond?" }), searchMessages: async () => [] } as unknown as GmailPort;
     const service = createChiefOfStaff({ ledger, gmail, calendar: { listEvents: async () => [] } as unknown as CalendarPort, timezone: "UTC", planning: { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, ownerSpaces: async () => ["owner"], deliver: async (_space, text) => { delivered.push(text); }, reviewEmail, now: () => new Date("2029-01-01T00:00:00.000Z") });
     await service.reviewIncomingEmail("first");
-    expect(await handleProposalCommand({ ledger, gmail, ownerSpaceId: "owner", texts: ["ignore 1"] })).toContain("suppress");
+    expect(await handleProposalCommand({ ledger, gmail, ownerSpaceId: "owner", texts: ["ignore 1"] })).toContain("dismissed this item");
     await service.reviewIncomingEmail("second");
-    expect(reviewEmail).toHaveBeenCalledOnce();
-    expect(delivered).toHaveLength(1);
+    expect(reviewEmail).toHaveBeenCalledTimes(2);
+    expect(delivered).toHaveLength(2);
     ledger.close();
   });
 

@@ -1,3 +1,4 @@
+import {ownerPreferenceKey,preferencesForOwner} from "./owner-preferences.js";
 import type { CalendarPort } from "./capabilities/calendar.js";
 import type { GmailMessage, GmailPort } from "./capabilities/gmail.js";
 import { dueDailyReview, localDate } from "./daily-review.js";
@@ -292,17 +293,12 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
       catch (error) { if (isMissingGoogleResource(error)) return undefined; throw error; }
     }))).filter((item): item is GmailMessage => Boolean(item));
     const urgent = deterministicallyUrgent(message);
-    const preferences = deps.ledger.preferences(now());
-    const contactKey = `email_draft:contact:${recipient.toLowerCase()}`;
-    if (!urgent && preferences.some((rule) => rule.key === `${contactKey}:ignored`) && ownerSpaces.every((spaceId) => emailAlertMode(deps.ledger, spaceId) !== "actionable")) {
-      deps.ledger.setMetadata(reviewedKey, now().toISOString());
-      return;
-    }
-    const alwaysSurface = preferences.some((rule) => rule.key === `${contactKey}:always_surface`);
-    const lowPriority = preferences.some((rule) => rule.key === `${contactKey}:not_important`);
     for (const ownerSpaceId of ownerSpaces) {
-      const alertMode = emailAlertMode(deps.ledger, ownerSpaceId);
-      if (alertMode !== "actionable" && !urgent && preferences.some((rule) => rule.key === `${contactKey}:ignored`)) continue;
+      const preferences=preferencesForOwner(deps.ledger,ownerSpaceId,now());
+      const contactKey=ownerPreferenceKey(ownerSpaceId,`email:contact:${recipient.toLowerCase()}`);
+      const alwaysSurface=preferences.some(rule=>rule.key===`${contactKey}:always_surface`);
+      const lowPriority=false;
+      const alertMode=emailAlertMode(deps.ledger,ownerSpaceId);
       const prior = existing.find((entry) => entry.ownerSpaceId === ownerSpaceId)?.proposal;
       if (prior) {
         const key = `gmail:${messageId}:${ownerSpaceId}`;
@@ -368,7 +364,7 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
     for (const ownerSpaceId of pendingSpaces) {
       if (deps.reviewCalendar) {
         try {
-          const plan = await deps.reviewCalendar(calendarEvidence(events), deps.ledger.preferences(now()), input.date, deps.planning, ownerSpaceId);
+          const plan = await deps.reviewCalendar(calendarEvidence(events), preferencesForOwner(deps.ledger,ownerSpaceId,now()), input.date, deps.planning, ownerSpaceId);
           if (plan?.moves.length) {
           const snapshots = new Map(events.filter((event): event is typeof event & { id: string } => Boolean((event as { id?: string }).id)).map((event) => [(event as { id: string }).id, event as { etag?: string; updated?: string; summary?: string; start?: unknown; end?: unknown; recurringEventId?: string; organizer?: { self?: boolean }; attendees?: Array<{ self?: boolean }> }]));
           for (const move of plan.moves) {
@@ -393,7 +389,7 @@ export function createChiefOfStaff(deps: ChiefOfStaffDeps) {
             ownerSpaceId, kind: "calendar_move", sourceKey: `calendar:${input.date}`,
             summary: sensitivePlan ? "Sensitive calendar plan needs your review" : plan.summary, detail: exactDetail,
             payload: { timezone: deps.timezone, bufferMinutes: deps.planning.bufferMinutes, moves: plan.moves.map((move) => ({ ...move, expectedEtag: snapshots.get(move.eventId)?.etag, expectedUpdated: snapshots.get(move.eventId)?.updated })) },
-            evidence: { sourceType: "calendar", sourceId: input.date, category: "same-day-reshuffle", ruleIds: deps.ledger.preferences(now()).map((rule) => rule.key).slice(0, 20), rationale: sensitivePlan ? "A private scheduling conflict needs a decision." : plan.rationale, confidence: plan.confidence },
+            evidence: { sourceType: "calendar", sourceId: input.date, category: "same-day-reshuffle", ruleIds: preferencesForOwner(deps.ledger,ownerSpaceId,now()).map((rule) => rule.key).slice(0, 20), rationale: sensitivePlan ? "A private scheduling conflict needs a decision." : plan.rationale, confidence: plan.confidence },
             expiresAt: end.toISOString(),
             }, now());
           }

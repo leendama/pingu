@@ -43,6 +43,8 @@ export interface MessagePipelineDependencies {
   resolveChiefInterview?: (input: { texts: readonly string[]; spaceId: string; senderId: string }) => Promise<string | undefined>;
   /** Called once per turn after a reply (text or rich response) reaches the user. */
   onReplyDelivered?: () => void;
+  /** Observe a successfully delivered owner-DM text; failures must not trigger action retries. */
+  onOwnerTextDelivered?: (spaceId:string,text:string)=>Promise<void>;
 }
 
 export function formatEmailDraft(email: Pick<PendingEmail, "to" | "cc" | "bcc" | "subject" | "body">): string {
@@ -324,6 +326,7 @@ export function createMessageProcessor(dependencies: MessagePipelineDependencies
       }
       deliverySucceeded = true;
       dependencies.onReplyDelivered?.();
+      if(role==="owner"&&!isGroup){try{await dependencies.onOwnerTextDelivered?.(space.id,reply);}catch{console.warn("Delivered response could not be recorded for feedback.");}}
 
       if (context.draftForReview) {
         await dependencies.markEmailReviewed?.(space.id, context.draftForReview);

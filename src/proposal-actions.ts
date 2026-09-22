@@ -1,3 +1,4 @@
+import {ownerPreferenceKey,preferencesForOwner} from "./owner-preferences.js";
 import { createVerifiedGmailDraft, GmailDraftOutcomeError, type GmailPort } from "./capabilities/gmail.js";
 import { applyVerifiedCalendarMovePlan, type CalendarPort, type RescheduleMove } from "./capabilities/calendar.js";
 import { ProposalLedger, type Proposal } from "./proposals.js";
@@ -52,7 +53,7 @@ function decisionPreferenceKey(proposal: Proposal, decision: string): string {
   const subject = proposal.evidence.contact
     ? `contact:${proposal.evidence.contact.toLowerCase()}`
     : proposal.evidence.category ? `category:${proposal.evidence.category}` : `source:${proposal.evidence.sourceType}`;
-  return `${proposal.kind}:${subject}:${decision}`;
+  return ownerPreferenceKey(proposal.ownerSpaceId,`${proposal.kind.startsWith("email_")?"email":proposal.kind}:${subject}:${decision}`);
 }
 
 export async function executeEmailDraftProposal(ledger: ProposalLedger, gmail: GmailPort, proposal: Proposal): Promise<string> {
@@ -72,7 +73,7 @@ export async function executeEmailDraftProposal(ledger: ProposalLedger, gmail: G
     verifiedDraftId = await createVerifiedGmailDraft(gmail, { ...payload, messageIdHeader: `<pingu-${claimed.id}@pingu.local>` });
     const outcome = "Draft created and verified in Gmail for manual sending.";
     ledger.settle(proposal.id, "completed", outcome);
-    const preference = ledger.recordPreference({ key: `email:${proposal.evidence.contact ?? "unknown"}:approved`, value: "Owner approved a drafted reply.", confidence: 1, evidenceCount: 1 });
+    const preference = ledger.recordPreference({ key: ownerPreferenceKey(proposal.ownerSpaceId,`email:${proposal.evidence.contact ?? "unknown"}:approved`), value: "Owner approved a drafted reply.", confidence: 1, evidenceCount: 1 });
     ledger.linkPreference(proposal.id, preference.key);
     return "Draft’s in Gmail. Review and send it there.";
   } catch (error) {
@@ -113,7 +114,7 @@ export async function executeCalendarMoveProposal(ledger: ProposalLedger, calend
     verified = true;
     const outcome = `${result.moved} event(s) moved and verified; ${result.deletedDuplicates} duplicate(s) deleted.`;
     ledger.settle(proposal.id, "completed", outcome);
-    const preference = ledger.recordPreference({ key: "calendar:reshuffle:approved", value: claimed.summary, confidence: 1, evidenceCount: 1 });
+    const preference = ledger.recordPreference({ key: ownerPreferenceKey(claimed.ownerSpaceId,"calendar:reshuffle:approved"), value: claimed.summary, confidence: 1, evidenceCount: 1 });
     ledger.linkPreference(proposal.id, preference.key);
     return result.deletedDuplicates ? `Done. Moved ${result.moved}; deleted ${result.deletedDuplicates} duplicate${result.deletedDuplicates === 1 ? "" : "s"}.` : `Done. Moved ${result.moved} event${result.moved === 1 ? "" : "s"}.`;
   } catch (error) {
@@ -172,7 +173,7 @@ export async function handleProposalCommand(input: {
     }
     if (/^not now$/i.test(text.trim())) return "Until when?";
     if (/^preferences$/i.test(text.trim())) {
-      const rules = input.ledger.preferences();
+      const rules = preferencesForOwner(input.ledger,input.ownerSpaceId);
       input.ledger.setMetadata(`preference-view:${input.ownerSpaceId}`, JSON.stringify(rules.map((rule) => rule.key)));
       return rules.length ? rules.map((rule, index) => `${index + 1}. ${rule.key}: ${rule.value} (${Math.round(rule.confidence * 100)}%)`).join("\n") : "No learned preferences yet.";
     }
@@ -180,7 +181,7 @@ export async function handleProposalCommand(input: {
     if (forget) {
       const snapshot = input.ledger.getMetadata(`preference-view:${input.ownerSpaceId}`);
       const key = snapshot ? (JSON.parse(snapshot) as string[])[Number(forget[1]) - 1] : undefined;
-      return key && input.ledger.deletePreference(key) ? "Forgot it." : "I can't match that preference number. Send “preferences” first.";
+      return key && preferencesForOwner(input.ledger,input.ownerSpaceId).some(r=>r.key===key) && input.ledger.deletePreference(key) ? "Forgot it." : "I can't match that preference number. Send “preferences” first.";
     }
     const edited = text.trim().match(/^edit\s+(\d+)\s*:\s*([\s\S]+)$/i);
     if (edited) {
@@ -188,8 +189,7 @@ export async function handleProposalCommand(input: {
       const proposal = input.ledger.updateEmailDraftBody(input.ownerSpaceId, ordinal, edited[2]!.trim());
       if (proposal) {
         input.ledger.recordFeedback(proposal.id, "Owner replaced the generated draft body before approval.");
-        const preference = input.ledger.recordPreference({ key: "email:draft:edited", value: "Owner commonly edits generated drafts before approval.", confidence: 1, evidenceCount: 1 }, input.now);
-        input.ledger.linkPreference(proposal.id, preference.key);
+
       }
       return proposal ? `Updated. Reply “approve ${ordinal}” to create the Gmail draft.` : "I can't edit that current proposal.";
     }
@@ -205,8 +205,6 @@ export async function handleProposalCommand(input: {
       return proposalDetail(command.proposal);
     }
     if (command.type === "done") {
-      const preference = input.ledger.recordPreference({ key: `proposal:${command.proposal.kind}:completed_elsewhere`, value: command.proposal.summary, confidence: 1, evidenceCount: 1 }, input.now);
-      input.ledger.linkPreference(command.proposal.id, preference.key);
       return "Got it. Marked done.";
     }
     if (command.type === "always_surface") {
@@ -215,16 +213,11 @@ export async function handleProposalCommand(input: {
       return "Got it. I’ll keep surfacing things like this.";
     }
     if (command.type === "reject") {
-      const value = command.disposition === "ignored"
-        ? "Suppress materially similar items unless a new urgent signal appears."
-        : command.disposition === "not_important" ? "Treat materially similar items as low priority." : "The owner rejected this proposed action.";
-      const preference = input.ledger.recordPreference({ key: decisionPreferenceKey(command.proposal, command.disposition), value: feedbackMatch?.[3] ?? value, confidence: 1, evidenceCount: 1 }, input.now);
-      input.ledger.linkPreference(command.proposal.id, preference.key);
-      return command.disposition === "not_important" ? "Got it. I’ll treat things like this as low priority." : command.disposition === "ignored" ? "Got it. I’ll suppress things like this unless something changes." : "Got it. I won't act on that.";
+      input.ledger.recordFeedback(command.proposal.id,feedbackMatch?.[3]??`Owner marked this item ${command.disposition}. This is not a preference about future mail.`);
+      return "got it — dismissed this item. future emails from this person are unchanged.";
     }
     if (command.type === "defer") {
-      const preference = input.ledger.recordPreference({ key: decisionPreferenceKey(command.proposal, "deferred"), value: `Owner deferred until ${command.until}.`, confidence: 1, evidenceCount: 1 }, input.now);
-      input.ledger.linkPreference(command.proposal.id, preference.key);
+      input.ledger.recordFeedback(command.proposal.id,`Owner deferred this item until ${command.until}.`);
       return `Deferred until ${command.until}.`;
     }
     if (command.proposal.kind === "email_draft") return executeEmailDraftProposal(input.ledger, input.gmail, command.proposal);

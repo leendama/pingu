@@ -1,3 +1,5 @@
+import {ResponseFeedback} from "./response-feedback.js";
+import {responseFeedbackPlugin} from "./capabilities/response-feedback.js";
 import { PriorityReviews,priorityReviewRunner,priorityReviewPoller,modelPriorityReviewer } from "./priority-review.js";
 import { priorityReviewPlugin } from "./capabilities/priority-review.js";
 import { emailCommitmentPoller, nudgeDueCommitments, captureMeetingCommitments } from "./commitment-follow-through.js";
@@ -168,6 +170,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const workflowRuns = new WorkflowRuns();
   const personalState = new PersonalState();
   const priorityReviews=new PriorityReviews();
+  const responseFeedback=new ResponseFeedback();
   const meetingOutcomes=new MeetingOutcomes();
   const meetingVault=process.env.PINGU_MEETING_OUTCOMES==="true" ? process.env.PINGU_VAULT_PATH : undefined;
   const meetingNotes=meetingVault ? new MeetingNotes(meetingVault,settings.timezone) : undefined;
@@ -177,7 +180,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const legacyProposals = proposalLedger.invalidateLegacyEmailReplyProposals();
   if (legacyProposals) console.log("Invalidated legacy email proposals after the outcome-classification upgrade:", legacyProposals);
   const stopOwnerRemoval = onOwnerRemoved(async (owner) => {
-    if (owner.spaceId) { browserActions?.forget(owner.spaceId); workflowRuns.forget(owner.spaceId); proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); await meetingOutcomes.forget(owner.spaceId); await priorityReviews.forget(owner.spaceId); }
+    if (owner.spaceId) { browserActions?.forget(owner.spaceId); workflowRuns.forget(owner.spaceId); proposalLedger.invalidateOwnerSpace(owner.spaceId); await personalState.forget(owner.spaceId); await meetingOutcomes.forget(owner.spaceId); await priorityReviews.forget(owner.spaceId); await responseFeedback.forget(owner.spaceId); }
   });
   const structuredReviewer = {
     call: async (prompt: string, tool: import("openai/resources/responses/responses").Tool): Promise<Record<string, unknown>> => {
@@ -203,6 +206,11 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     },
     send: sendToSpace,
   };
+  const rememberResponse=async(owner:string,category:Parameters<ResponseFeedback["remember"]>[1],text:string)=>{
+    try{await responseFeedback.remember(owner,category,text);}catch{console.warn("Response feedback target could not be saved; delivery was already completed.");}
+  };
+  const deliverWithFeedback=async(owner:string,text:string,category:Parameters<ResponseFeedback["remember"]>[1])=>{await deliverToOwner(proactive,owner,text);await rememberResponse(owner,category,text);};
+  const feedbackOwners=async(category:"meeting_goals"|"commitment_reminder")=>{const active=[];for(const owner of await ownerSpaceIds())if(await responseFeedback.enabled(owner,category))active.push(owner);return active;};
   const chiefOfStaff = createChiefOfStaff({
     gmail,
     calendar,
@@ -211,8 +219,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     planning: { workdayStart: settings.chiefOfStaff.workdayStart, workdayEnd: settings.chiefOfStaff.workdayEnd, bufferMinutes: settings.chiefOfStaff.bufferMinutes, minimumNoticeHours: settings.chiefOfStaff.minimumNoticeHours },
     ownerSpaces: ownerSpaceIds,
     trackEmail: (spaceId, message, summary, counterparty) => personalState.trackEmail(spaceId, message, summary, counterparty),
-    deliver: (spaceId, text) => deliverToOwner(proactive, spaceId, text),
-    reviewEmail: (message, preferences, ownerSpaceId) => reviewEmailWithModel(structuredReviewer, message, preferences, operatingBriefText(proposalLedger, ownerSpaceId), { now: new Date().toISOString(), timezone: settings.timezone }),
+    deliver: (spaceId, text) => deliverWithFeedback(spaceId,text,"chief_briefing"),
+    reviewEmail: async (message, preferences, ownerSpaceId) => reviewEmailWithModel(structuredReviewer, message, preferences, operatingBriefText(proposalLedger, ownerSpaceId), { now: new Date().toISOString(), timezone: settings.timezone }, await responseFeedback.examples(ownerSpaceId,"chief_briefing")),
     reviewCalendar: (events, preferences, date, planning, ownerSpaceId) => reviewCalendarWithModel(structuredReviewer, events.map((event) => presentCalendarEvent(event as CalendarEventData, settings.timezone)), preferences, date, planning, operatingBriefText(proposalLedger, ownerSpaceId)),
     learnHistory: (input) => learnHistoryWithModel(structuredReviewer, input),
   });
@@ -223,7 +231,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     for (const spaceId of await ownerSpaceIds()) {
       const metadataKey = `chief-of-staff:reported-failure:${incidentKey}:${spaceId}`;
       if (proposalLedger.getMetadata(metadataKey)) continue;
-      await deliverToOwner(proactive, spaceId, text);
+      await deliverWithFeedback(spaceId,text,"service_notice");
       proposalLedger.setMetadata(metadataKey, new Date().toISOString());
     }
   };
@@ -264,7 +272,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const stopPriorityReviews=runPriorityReview&&process.env.PINGU_PRIORITY_REVIEWS==="true" ? startPoller("Priority reviews",10*60_000,priorityReviewPoller({store:priorityReviews,owners:ownerSpaceIds,timezone:settings.timezone,run:runPriorityReview})):()=>undefined;
 
   const registry = new PluginRegistry([
-    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: async (spaceId) => { workflowRuns.forget(spaceId); browserActions?.forget(spaceId); await meetingOutcomes.forget(spaceId); await priorityReviews.forget(spaceId); }, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
+    responseFeedbackPlugin(responseFeedback,{meeting_goals:!!meetingNotes,commitment_reminder:process.env.PINGU_COMMITMENT_NUDGES==="due"}),
+    ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: async (spaceId) => { workflowRuns.forget(spaceId); browserActions?.forget(spaceId); await meetingOutcomes.forget(spaceId); await priorityReviews.forget(spaceId); await responseFeedback.forget(spaceId); }, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
     ...(priorityBrain&&runPriorityReview ? [priorityReviewPlugin(priorityReviews,priorityBrain,runPriorityReview)] : []),
     ...(meetingNotes ? [meetingOutcomesPlugin(meetingOutcomes,calendar,meetingNotes)] : []),
     ...(browserActions ? [browserPlugin(browserActions,sendToSpace)] : []),
@@ -274,14 +283,14 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const executeWorkflow = workflowExecutor(client, registry, settings.model, settings.timezone, kind === "openai");
   const stopWorkflowRuns = startPoller("Workflow runner", 60_000, () => tickWorkflowRuns(workflowRuns, {
     owners: ownerSpaceIds, execute: executeWorkflow,
-    deliver: (owner, text) => deliverToOwner(proactive, owner, text),
+    deliver: (owner, text) => deliverWithFeedback(owner,text,"workflow"),
   }));
   const stopActionReconciliation = startPoller("Action reconciliation", 60_000, async () => {
     await reconcileActions(proposalLedger, gmail, calendar, await ownerSpaceIds());
   });
   const instructions = agentInstructions(settings, registry.instructions);
   const stopMeetingPrompts=meetingNotes ? startPoller("Meeting outcome prompts",60_000,async()=>{
-    await promptForMeetingOutcomes(meetingOutcomes,{calendar,owners:ownerSpaceIds,timezone:settings.timezone,deliver:(owner,text)=>deliverToOwner(proactive,owner,text),existingOutcomes:async(event,owner)=>{
+    await promptForMeetingOutcomes(meetingOutcomes,{calendar,owners:()=>feedbackOwners("meeting_goals"),timezone:settings.timezone,deliver:(owner,text)=>deliverWithFeedback(owner,text,"meeting_goals"),existingOutcomes:async(event,owner)=>{
       const existing=await meetingNotes.existing(event.id!,event.extendedProperties?.private?.pinguMeetingBrief);
       if(!existing) return false;
       await meetingOutcomes.update(owner,event.id!,{...existing,capturedAt:new Date().toISOString(),calendarLinked:event.extendedProperties?.private?.pinguMeetingBrief===existing.briefSource});return true;
@@ -297,12 +306,12 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     if(response.status!=="completed"||!call||call.type!=="function_call") throw new Error("Commitment extraction incomplete.");
     return JSON.parse(call.arguments) as Record<string,unknown>;
   }}})):()=>undefined;
-  const stopCommitmentNudges=process.env.PINGU_COMMITMENT_NUDGES==="due" ? startPoller("Commitment nudges",60_000,()=>nudgeDueCommitments({state:personalState,owners:ownerSpaceIds,timezone:settings.timezone,deliver:(owner,text)=>deliverToOwner(proactive,owner,text)})):()=>undefined;
+  const stopCommitmentNudges=process.env.PINGU_COMMITMENT_NUDGES==="due" ? startPoller("Commitment nudges",60_000,()=>nudgeDueCommitments({state:personalState,owners:()=>feedbackOwners("commitment_reminder"),timezone:settings.timezone,deliver:(owner,text)=>deliverWithFeedback(owner,text,"commitment_reminder")})):()=>undefined;
 
   const generateReply = createReplyGenerator({
     respond: async (input, context) => client.responses.create({
       model: settings.model,
-      instructions: `${instructions}\n${turnInstructions(settings, context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}${context.role === "owner" && !context.isGroup ? workflowRuns.context(context.spaceId) : ""}${context.role === "owner" && !context.isGroup ? await personalState.context(context.spaceId) : ""}${meetingNotes&&context.role==="owner"&&!context.isGroup ? await meetingOutcomes.context(context.spaceId):""}\n${temporalInstructions(settings.timezone)}`,
+      instructions: `${instructions}\n${turnInstructions(settings, context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}${context.role === "owner" && !context.isGroup ? workflowRuns.context(context.spaceId) : ""}${context.role === "owner" && !context.isGroup ? await personalState.context(context.spaceId) : ""}${context.role==="owner"&&!context.isGroup ? await responseFeedback.context(context.spaceId):""}${meetingNotes&&context.role==="owner"&&!context.isGroup ? await meetingOutcomes.context(context.spaceId):""}\n${temporalInstructions(settings.timezone)}`,
       input,
       tools: registry.toolsFor(context),
       ...(context.role === "guest" ? { max_output_tokens: settings.guest.maxOutputTokens } : {}),
@@ -400,6 +409,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       : undefined,
     resolveOwnerReply: (input) => scheduling.resolveOwnerReply(input),
     onReplyDelivered: markReplyDelivered,
+    onOwnerTextDelivered: (owner,text)=>rememberResponse(owner,"conversation",text),
     synthesizeVoice: async (text) => {
       if (!capabilities.voice) throw new Error("Voice replies need an OpenAI model provider.");
       const speech = await client.audio.speech.create({

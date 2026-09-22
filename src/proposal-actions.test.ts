@@ -224,11 +224,12 @@ describe("proposal commands", () => {
     ledger.close();
   });
 
-  it("keeps edit feedback and the preference it taught", async () => {
+  it("keeps edit feedback without inferring a general preference from one edit", async () => {
     const { ledger, proposal } = await setup();
     const response = await handleProposalCommand({ ledger, gmail: {} as GmailPort, ownerSpaceId: "owner", texts: ["edit 1: A shorter answer."], now: new Date("2029-01-01T01:00:00.000Z") });
     expect(response).toContain("Updated");
-    expect(ledger.currentBriefingProposals("owner")[0]).toMatchObject({ id: proposal.id, detail: "A shorter answer.", ownerFeedback: "Owner replaced the generated draft body before approval.", preferenceKey: "email:draft:edited" });
+    expect(ledger.currentBriefingProposals("owner")[0]).toMatchObject({ id: proposal.id, detail: "A shorter answer.", ownerFeedback: "Owner replaced the generated draft body before approval." });
+    expect(ledger.preferences()).toEqual([]);
     ledger.close();
   });
 });

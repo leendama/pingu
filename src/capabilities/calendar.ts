@@ -2,6 +2,33 @@ import { armPendingAction } from "../pending-confirmations.js";
 import type { PinguPlugin } from "../plugins.js";
 import { capabilityPlugin, cleanHeader, stringArray, stringValue, type JsonObject } from "../tools.js";
 
+/**
+ * A full event read can contain invitation text written by somebody else. A
+ * create request may follow that read only when its identifying details came
+ * from the owner's current message, rather than from the event.
+ */
+function assertOwnerCreateRequest(args: JsonObject, context: { currentSenderText?: string; untrustedContentSeen: boolean }, title: string, start: string, end: string): void {
+  if (!context.untrustedContentSeen) return;
+  const quote = stringValue(args.owner_quote);
+  const ownerText = context.currentSenderText ?? "";
+  if (!quote || !ownerText.includes(quote)) {
+    throw new Error("After reading an invitation, quote the owner's current booking request before creating an independent event.");
+  }
+  if (!quote.toLocaleLowerCase().includes(title.toLocaleLowerCase())) {
+    throw new Error("The event title must appear in the owner's quoted booking request.");
+  }
+  for (const value of [start, end]) {
+    const match = /T(\d{2}):(\d{2})/.exec(value);
+    if (!match) continue;
+    const hour = Number(match[1]);
+    const minute = match[2];
+    const twelveHour = hour % 12 || 12;
+    const meridiem = hour < 12 ? "am" : "pm";
+    const clock = new RegExp(`\\b(?:${hour}:${minute}|${hour}|${twelveHour}(?::${minute})?\\s*(?:${meridiem})?)\\b`, "i");
+    if (!clock.test(quote)) throw new Error("The event times must appear in the owner's quoted booking request.");
+  }
+}
+
 /** Attendees other than the owner; deleting such an event emails them a cancellation. */
 export function otherAttendeeCount(event: CalendarEventData): number {
   if (!Array.isArray(event.attendees)) return 0;
@@ -780,17 +807,20 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
               location: { type: ["string", "null"] },
               attendees: { type: "array", items: { type: "string", description: "Attendee email address." } },
               recurrence: { type: ["string", "null"], description: "Optional RFC 5545 recurrence rule without the RRULE prefix, for example FREQ=WEEKLY;BYDAY=SU. Null creates a one-off event." },
+              owner_quote: { type: ["string", "null"], description: "When an invitation was read this turn, exact text from the owner's current message that requests this event; otherwise null." },
             },
-            required: ["title", "start", "end", "timezone", "description", "location", "attendees", "recurrence"],
+            required: ["title", "start", "end", "timezone", "description", "location", "attendees", "recurrence", "owner_quote"],
             additionalProperties: false,
           },
         },
+        safeAfterUntrusted: true,
         run: async (args, context) => {
           const title = stringValue(args.title);
           const start = stringValue(args.start);
           const end = stringValue(args.end);
           const timezone = stringValue(args.timezone) ?? context.config.timezone;
           if (!title || !start || !end) throw new Error("Event title, start, and end are required.");
+          assertOwnerCreateRequest(args, context, title, start, end);
 
           const zones = await calendarZones(port, timezone);
           const { startValue, endValue, startMs, endMs } = eventWindow(start, end, zones);

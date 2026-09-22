@@ -50,6 +50,14 @@ it("pauses one category without enabling globally disabled reminders",async()=>{
  await memory.pause("owner","meeting_goals",true);expect(await memory.enabled("owner","meeting_goals")).toBe(false);expect(await memory.enabled("other","meeting_goals")).toBe(true);
  await memory.forget("owner");expect(await memory.get("owner")).toBeUndefined();
 });
+it("rejects attempts to turn a quality rating into a pause",async()=>{
+ const registry=new PluginRegistry([responseFeedbackPlugin(memory,{meeting_goals:true,commitment_reminder:false})]);
+ for(const text of ["not useful","don't pause meeting reminders"]){
+  const context={role:"owner",isGroup:false,spaceId:"owner",currentSenderText:text,untrustedContentSeen:true} as ToolRunContext;
+  const result=await registry.run("set_feedback_reminder_pause",JSON.stringify({category:"meeting_goals",paused:true,owner_quote:text}),context);
+  expect(result.handled&&result.output).toContain("explicit request");expect(await memory.enabled("owner","meeting_goals")).toBe(true);
+ }
+});
 it("isolates feedback tools from guests and groups",async()=>{
  const registry=new PluginRegistry([responseFeedbackPlugin(memory,{meeting_goals:true,commitment_reminder:false})]);
  for(const audience of [{role:"guest" as const,isGroup:false},{role:"owner" as const,isGroup:true}])expect(registry.toolsFor(audience)).toEqual([]);

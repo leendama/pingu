@@ -16,6 +16,7 @@ describe("background workflow executor",()=>{
   const save=vi.fn();const write=vi.fn();const execute=workflowExecutor({responses:{create}} as unknown as Pick<OpenAI,"responses">,new PluginRegistry([plugin(write)]),"configured-model","UTC",true);
   expect(await execute(run,save)).toContain("Meeting tomorrow");expect(save).toHaveBeenCalledOnce();expect(write).not.toHaveBeenCalled();expect(create.mock.calls[0]![0].tools.map((t:{name:string})=>t.name)).toEqual(["search_gmail"]);
   expect(JSON.parse(save.mock.calls[0]![0]).reads).toBe(1);
+  expect(create.mock.calls[0]![0].instructions).toContain("explain the main trade-off");
  });
  it("refuses a hallucinated write call even if the model names it",async()=>{
   const create=vi.fn().mockResolvedValue({status:"completed",output:[{type:"function_call",name:"send_mail",arguments:"{}",call_id:"call"}]});const write=vi.fn();

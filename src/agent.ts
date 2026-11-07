@@ -35,7 +35,7 @@ import { handleProposalCommand } from "./proposal-actions.js";
 import { deliverToOwner } from "./proactive-delivery.js";
 import { createChiefOfStaff } from "./chief-of-staff.js";
 import { learnHistoryWithModel, reviewCalendarWithModel, reviewEmailWithModel } from "./chief-reviewer.js";
-import { dueDailyReview, startDailyReviewScheduler } from "./daily-review.js";
+import { dueDailyReview, localDate, startDailyReviewScheduler } from "./daily-review.js";
 import { startGmailHistoryScheduler } from "./gmail-history.js";
 import { startPoller } from "./poller.js";
 import { handleChiefInterview, operatingBriefText } from "./chief-interview.js";
@@ -51,6 +51,7 @@ import { MeetingNotes,linkMeetingBrief } from "./meeting-notes.js";
 import { meetingOutcomesPlugin } from "./capabilities/meeting-outcomes.js";
 import { meetingReviewPoller,modelMeetingReviewer } from "./meeting-review.js";
 import { PersonalBrain } from "./personal-brain.js";
+import { ownerDecisionFramework, CHIEF_DECISION_FRAMEWORK } from "./owner-decision-framework.js";
 import { granolaPort } from "./granola.js";
 
 export function agentInstructions(settings: RuntimeSettings, pluginInstructions: string[]): string {
@@ -220,8 +221,8 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     ownerSpaces: ownerSpaceIds,
     trackEmail: (spaceId, message, summary, counterparty) => personalState.trackEmail(spaceId, message, summary, counterparty),
     deliver: (spaceId, text) => deliverWithFeedback(spaceId,text,"chief_briefing"),
-    reviewEmail: async (message, preferences, ownerSpaceId) => reviewEmailWithModel(structuredReviewer, message, preferences, operatingBriefText(proposalLedger, ownerSpaceId), { now: new Date().toISOString(), timezone: settings.timezone }, await responseFeedback.examples(ownerSpaceId,"chief_briefing")),
-    reviewCalendar: (events, preferences, date, planning, ownerSpaceId) => reviewCalendarWithModel(structuredReviewer, events.map((event) => presentCalendarEvent(event as CalendarEventData, settings.timezone)), preferences, date, planning, operatingBriefText(proposalLedger, ownerSpaceId)),
+    reviewEmail: async (message, preferences, ownerSpaceId) => reviewEmailWithModel(structuredReviewer, message, preferences, operatingBriefText(proposalLedger, ownerSpaceId), { now: new Date().toISOString(), timezone: settings.timezone }, await responseFeedback.examples(ownerSpaceId,"chief_briefing"), CHIEF_DECISION_FRAMEWORK),
+    reviewCalendar: (events, preferences, date, planning, ownerSpaceId) => reviewCalendarWithModel(structuredReviewer, events.map((event) => presentCalendarEvent(event as CalendarEventData, settings.timezone)), preferences, date, planning, operatingBriefText(proposalLedger, ownerSpaceId), CHIEF_DECISION_FRAMEWORK),
     learnHistory: (input) => learnHistoryWithModel(structuredReviewer, input),
   });
   const reportChiefFailure = async (key: string, text: string): Promise<void> => {
@@ -272,7 +273,12 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const stopPriorityReviews=runPriorityReview&&process.env.PINGU_PRIORITY_REVIEWS==="true" ? startPoller("Priority reviews",10*60_000,priorityReviewPoller({store:priorityReviews,owners:ownerSpaceIds,timezone:settings.timezone,run:runPriorityReview})):()=>undefined;
 
   const registry = new PluginRegistry([
-    responseFeedbackPlugin(responseFeedback,{meeting_goals:!!meetingNotes,commitment_reminder:process.env.PINGU_COMMITMENT_NUDGES==="due"}),
+    responseFeedbackPlugin(responseFeedback,{meeting_goals:!!meetingNotes,commitment_reminder:process.env.PINGU_COMMITMENT_NUDGES==="due"},priorityBrain ? async(entry)=>priorityBrain.capture({
+      title:`Pingu decision-pattern feedback: ${entry.kind.replaceAll("_"," ")}`,
+      content:`Response category: ${entry.category}\n\nPingu response:\n${entry.response}\n\nOwner feedback:\n${entry.ownerQuote}`,
+      source:"Pingu explicit response feedback",
+      kind:"recollection",
+    },localDate(Date.now(),settings.timezone)) : undefined),
     ...builtInPlugins(settings, { voice: capabilities.voice, scheduling, proposalLedger, personalState, vaultPath: process.env.PINGU_VAULT_PATH, forgetWorkflows: async (spaceId) => { workflowRuns.forget(spaceId); browserActions?.forget(spaceId); await meetingOutcomes.forget(spaceId); await priorityReviews.forget(spaceId); await responseFeedback.forget(spaceId); }, webResearch: kind === "openai" ? openaiWebResearchPort(client, settings.model) : undefined }),
     ...(priorityBrain&&runPriorityReview ? [priorityReviewPlugin(priorityReviews,priorityBrain,runPriorityReview)] : []),
     ...(meetingNotes ? [meetingOutcomesPlugin(meetingOutcomes,calendar,meetingNotes)] : []),
@@ -311,7 +317,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   const generateReply = createReplyGenerator({
     respond: async (input, context) => client.responses.create({
       model: settings.model,
-      instructions: `${instructions}\n${turnInstructions(settings, context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}${context.role === "owner" && !context.isGroup ? workflowRuns.context(context.spaceId) : ""}${context.role === "owner" && !context.isGroup ? await personalState.context(context.spaceId) : ""}${context.role==="owner"&&!context.isGroup ? await responseFeedback.context(context.spaceId):""}${meetingNotes&&context.role==="owner"&&!context.isGroup ? await meetingOutcomes.context(context.spaceId):""}\n${temporalInstructions(settings.timezone)}`,
+      instructions: `${instructions}\n${turnInstructions(settings, context)}${ownerDecisionFramework(context)}${context.role === "owner" && !context.isGroup && operatingBriefText(proposalLedger, context.spaceId) ? `\nOwner-authored operating brief. Treat this as trusted preference context:\n${operatingBriefText(proposalLedger, context.spaceId)}` : ""}${ownerBriefingContext(proposalLedger, context)}${context.role === "owner" && !context.isGroup ? workflowRuns.context(context.spaceId) : ""}${context.role === "owner" && !context.isGroup ? await personalState.context(context.spaceId) : ""}${context.role==="owner"&&!context.isGroup ? await responseFeedback.context(context.spaceId):""}${meetingNotes&&context.role==="owner"&&!context.isGroup ? await meetingOutcomes.context(context.spaceId):""}\n${temporalInstructions(settings.timezone)}`,
       input,
       tools: registry.toolsFor(context),
       ...(context.role === "guest" ? { max_output_tokens: settings.guest.maxOutputTokens } : {}),

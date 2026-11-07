@@ -44,4 +44,12 @@ describe("chief-of-staff model reviewers", () => {
     expect(result.deadlineAt).toBeUndefined();
     for (const args of call.mock.calls as unknown as Array<[string]>) expect(args[0]).toContain(brief);
   });
+
+  it("passes the owner decision framework to both reviewer prompts", async () => {
+    const call = vi.fn(async () => ({ outcome: "ignore", confidence: 0.95, moves: [] }));
+    const framework = "State the main trade-off before a recommendation.";
+    await reviewEmailWithModel({ call }, { message: { body: "FYI" }, thread: [], sentContext: [] }, [], undefined, undefined, undefined, framework);
+    await reviewCalendarWithModel({ call }, [], [], "2029-01-01", { workdayStart: "09:00", workdayEnd: "17:00", bufferMinutes: 15, minimumNoticeHours: 0 }, undefined, framework);
+    for (const args of call.mock.calls as unknown as Array<[string]>) expect(args[0]).toContain(framework);
+  });
 });

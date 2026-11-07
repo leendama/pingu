@@ -62,6 +62,14 @@ it("isolates feedback tools from guests and groups",async()=>{
  const registry=new PluginRegistry([responseFeedbackPlugin(memory,{meeting_goals:true,commitment_reminder:false})]);
  for(const audience of [{role:"guest" as const,isGroup:false},{role:"owner" as const,isGroup:true}])expect(registry.toolsFor(audience)).toEqual([]);
 });
+it("captures only explicit owner feedback as an optional private decision pattern",async()=>{
+ const capture=vi.fn(async()=>({path:"inbox/feedback.md"}));const registry=new PluginRegistry([responseFeedbackPlugin(memory,{meeting_goals:true,commitment_reminder:false},capture)]);
+ const target=await memory.remember("owner","conversation","A narrow recommendation.");
+ const context={role:"owner",isGroup:false,spaceId:"owner",currentSenderText:"too long",untrustedContentSeen:false} as ToolRunContext;
+ const result=await registry.run("record_response_feedback",JSON.stringify({target_id:target.id,kind:"too_long",owner_quote:"too long"}),context);
+ expect(result.handled&&result.output).toContain("inbox/feedback.md");
+ expect(capture).toHaveBeenCalledWith(expect.objectContaining({ownerSpaceId:"owner",response:"A narrow recommendation.",ownerQuote:"too long"}));
+});
 it("scopes new preference rules and ignores legacy broad dismissal rules",()=>{
  const ledger=new ProposalLedger(join(dir,"ledger.sqlite"));
  for(const key of [ownerPreferenceKey("owner-a","email:contact:alex@example.com:always_surface"),ownerPreferenceKey("owner-b","email:contact:morgan@example.com:always_surface"),"email_draft:contact:legacy@example.com:ignored","inferred:email:style"])

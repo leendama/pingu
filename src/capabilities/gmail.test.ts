@@ -128,6 +128,30 @@ describe("gmailPlugin", () => {
     );
   });
 
+  it("keeps a direct reply draft in the source Gmail thread", async () => {
+    const state = { raws: [] as string[], sent: [] as string[], threadIds: [] as Array<string | undefined> };
+    const port = fakePort(state);
+    port.readMessage = async () => ({
+      id: "source-message", threadId: "source-thread", from: "Sender <sender@example.com>",
+      subject: "Project update", messageIdHeader: "<source@example.com>", references: "<earlier@example.com>", body: "Can you confirm?",
+    });
+    port.createDraft = async (raw, threadId) => {
+      state.raws.push(raw);
+      state.threadIds.push(threadId);
+      return "reply-draft";
+    };
+
+    await gmailPlugin(port, fakeStore()).run("create_gmail_draft", JSON.stringify({
+      ...draftArgs, subject: "Re: changed by the model", reply_to_message_id: "source-message",
+    }), chatContext());
+
+    expect(state.threadIds).toEqual(["source-thread"]);
+    const raw = Buffer.from(state.raws[0]!, "base64url").toString("utf8");
+    expect(raw).toContain("Subject: =?UTF-8?B?UHJvamVjdCB1cGRhdGU=?=");
+    expect(raw).toContain("In-Reply-To: <source@example.com>");
+    expect(raw).toContain("References: <earlier@example.com> <source@example.com>");
+  });
+
   it("does not report an ad-hoc draft whose Gmail read-back differs", async () => {
     const port = fakePort({ raws: [], sent: [] });
     port.readDraft = async () => ({ id: "draft-1", message: { to: "other@example.com", cc: "", bcc: "", subject: "Lunch", body: "Midday tomorrow?" } });

@@ -233,6 +233,12 @@ export async function createVerifiedGmailDraft(port: GmailPort, input: {
   }
 }
 
+function replyReferences(message: GmailMessage): string {
+  return [message.references, message.messageIdHeader]
+    .flatMap((value) => value?.trim() ? [value.trim()] : [])
+    .join(" ");
+}
+
 export function gmailPlugin(port: GmailPort, _legacyPendingEmails?: PendingEmailStore): PinguPlugin {
   return capabilityPlugin(
     {
@@ -241,7 +247,7 @@ export function gmailPlugin(port: GmailPort, _legacyPendingEmails?: PendingEmail
       description: "Search, read, and draft email for the owner to send manually in Gmail.",
       instructions: [
         "Gmail search returns summaries with From and To headers. When the owner asks for someone's email address, or names an email recipient without an address, search Gmail before asking them for it. Search the inbox for mail from the person's name first; if needed, search sent and received mail by that name. Use an address only when the headers clearly associate it with that person. If there are no reliable matches, ask; if there are conflicting matches, show the short choices and ask which one.",
-        "Call read_gmail_message with a result ID whenever the user asks to read, summarize, quote, or reply based on the full email.",
+        "Call read_gmail_message with a result ID whenever the user asks to read, summarize, quote, or reply based on the full email. When drafting a reply to that email, pass its ID as reply_to_message_id so the Gmail draft stays in the original thread.",
       ],
     },
     [
@@ -308,6 +314,7 @@ export function gmailPlugin(port: GmailPort, _legacyPendingEmails?: PendingEmail
               bcc: { type: "array", items: { type: "string" } },
               subject: { type: "string" },
               body: { type: "string", description: "Plain-text email body without a signature. Pingu adds its signature automatically." },
+              reply_to_message_id: { type: "string", description: "Optional Gmail message ID being replied to. Use the ID from read_gmail_message to keep the draft in that Gmail thread." },
             },
             required: ["to", "cc", "bcc", "subject", "body"],
             additionalProperties: false,
@@ -318,8 +325,22 @@ export function gmailPlugin(port: GmailPort, _legacyPendingEmails?: PendingEmail
           if (stringArray(args.to).length === 0) throw new Error("At least one recipient is required.");
           const rawBody = typeof args.body === "string" ? args.body : "";
           const body = appendPinguSignature(rawBody);
+          const replyToMessageId = stringValue(args.reply_to_message_id);
+          let replySource: GmailMessage | undefined;
+          if (replyToMessageId) {
+            replySource = await port.readMessage(replyToMessageId);
+            if (!replySource.threadId || !replySource.messageIdHeader) {
+              throw new Error("That Gmail message does not have the thread details needed to create a reply draft.");
+            }
+          }
           let draftId: string;
-          try { draftId = await createVerifiedGmailDraft(port, { to: stringArray(args.to), cc: stringArray(args.cc), bcc: stringArray(args.bcc), subject: stringValue(args.subject) ?? "", body: rawBody }); }
+          try {
+            draftId = await createVerifiedGmailDraft(port, {
+              to: stringArray(args.to), cc: stringArray(args.cc), bcc: stringArray(args.bcc),
+              subject: replySource?.subject ?? stringValue(args.subject) ?? "", body: rawBody,
+              ...(replySource ? { threadId: replySource.threadId!, inReplyTo: replySource.messageIdHeader!, references: replyReferences(replySource) } : {}),
+            });
+          }
           catch (error) {
             if (!(error instanceof GmailDraftOutcomeError)) throw error;
             return { output: JSON.stringify({ error: error.message, created: error.draftId ? true : "unknown", verified: false, draft_id: error.draftId, retry_allowed: false }) };

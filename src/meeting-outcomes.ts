@@ -62,6 +62,7 @@ export class MeetingOutcomes {
 export async function promptForMeetingOutcomes(store:MeetingOutcomes,deps:{calendar:CalendarPort;owners():Promise<string[]>;deliver(owner:string,text:string):Promise<void>;timezone:string;existingOutcomes?:(event:CalendarEventData,owner:string)=>Promise<boolean>},now=new Date()){
   const events=await deps.calendar.listEvents({timeMin:now.toISOString(),timeMax:new Date(now.getTime()+61*60_000).toISOString()});
   for(const owner of await deps.owners()) for(const candidate of events){
+    if(!candidate.id || candidate.readOnly) continue;
     if(!eligibleMeeting(candidate)) continue;
     const start=Date.parse(eventTime(candidate.start)!);
     if(start<=now.getTime() || start-now.getTime()>60*60_000) continue;

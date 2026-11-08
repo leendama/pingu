@@ -27,6 +27,11 @@ describe("meeting outcomes",()=>{
   const d=deps(vi.fn(async()=>{throw new Error("lost response");}));await promptForMeetingOutcomes(store,d,now);await promptForMeetingOutcomes(store,d,now);
   expect(d.deliver).toHaveBeenCalledOnce();expect((await store.get("owner","evt-1"))?.prompt).toBe("unknown");
  });
+ it("does not prompt about read-only availability events",async()=>{
+  event={...event,id:undefined,readOnly:true};
+  await promptForMeetingOutcomes(store,deps(),now);
+  expect(calendar.getEvent).not.toHaveBeenCalled();
+ });
  it("excludes interviews, solo events, declined invitations and all-day items",()=>{
   for(const candidate of [{...event,summary:"Interview with Alex"},{...event,attendees:[],summary:"Focus"},{...event,attendees:[{self:true,responseStatus:"declined"},{email:"a@example.com"}]},{...event,start:{date:"2029-02-05"}},{...event,status:"cancelled"}]) expect(eligibleMeeting(candidate)).toBe(false);
   expect(eligibleMeeting({...event,attendees:[],summary:"dinner with Alex"})).toBe(true);

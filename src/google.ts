@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { google } from "googleapis";
-import type { CalendarPort } from "./capabilities/calendar.js";
+import type { CalendarEventData, CalendarPort } from "./capabilities/calendar.js";
 import { boundedGmailBody, GmailHistoryExpiredError, type GmailPort } from "./capabilities/gmail.js";
 import { isMissingGoogleResource } from "./google-errors.js";
 import type { JsonObject } from "./tools.js";
@@ -13,6 +13,23 @@ export const googleScopes = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.compose",
 ];
+
+/** Comma-separated calendars Pingu may use as read-only availability. */
+export function readOnlyCalendarIds(value = process.env.PINGU_READ_CALENDAR_IDS): string[] {
+  return [...new Set((value ?? "").split(",").map((id) => id.trim()).filter((id) => id && id !== "primary"))].slice(0, 20);
+}
+
+/** Secondary calendars are availability only: no ID means they cannot be read or changed by a tool. */
+export function availabilityOnlyCalendarEvent(event: CalendarEventData): CalendarEventData {
+  return {
+    summary: event.summary,
+    start: event.start,
+    end: event.end,
+    status: event.status,
+    transparency: event.transparency,
+    readOnly: true,
+  };
+}
 
 export function googleOAuthClient(
   credentials: { clientId: string; clientSecret: string },
@@ -77,7 +94,7 @@ export async function googleClient(credentials?: RuntimeSettings["google"]) {
   });
 }
 
-export function googleCalendarPort(credentials?: RuntimeSettings["google"]): CalendarPort {
+export function googleCalendarPort(credentials?: RuntimeSettings["google"], readOnlyCalendars = readOnlyCalendarIds()): CalendarPort {
   let cachedTimezone: Promise<string | undefined> | undefined;
   return {
     getTimezone() {
@@ -97,23 +114,33 @@ export function googleCalendarPort(credentials?: RuntimeSettings["google"]): Cal
     },
     async listEvents(params) {
       const { calendar } = await googleClient(credentials);
-      const events = [];
-      let pageToken: string | undefined;
-      do {
-        const result = await calendar.events.list({
-          calendarId: "primary",
-          timeMin: params.timeMin,
-          timeMax: params.timeMax,
-          q: params.query,
-          singleEvents: true,
-          orderBy: "startTime",
-          maxResults: 2500,
-          pageToken,
-        });
-        events.push(...(result.data.items ?? []));
-        pageToken = result.data.nextPageToken ?? undefined;
-      } while (pageToken);
-      return events;
+      const list = async (calendarId: string) => {
+        const events: CalendarEventData[] = [];
+        let pageToken: string | undefined;
+        do {
+          const result = await calendar.events.list({
+            calendarId,
+            timeMin: params.timeMin,
+            timeMax: params.timeMax,
+            q: params.query,
+            singleEvents: true,
+            orderBy: "startTime",
+            maxResults: 2500,
+            pageToken,
+          });
+          events.push(...(result.data.items ?? []));
+          pageToken = result.data.nextPageToken ?? undefined;
+        } while (pageToken);
+        return events;
+      };
+      const primary = await list("primary");
+      const availability = (await Promise.all(readOnlyCalendars.map(list))).flat().map(availabilityOnlyCalendarEvent);
+      const start = (event: CalendarEventData) => {
+        if (!event.start || typeof event.start !== "object") return "";
+        const value = event.start as { dateTime?: unknown; date?: unknown };
+        return typeof value.dateTime === "string" ? value.dateTime : typeof value.date === "string" ? value.date : "";
+      };
+      return [...primary, ...availability].sort((left, right) => start(left).localeCompare(start(right)));
     },
     async getEvent(eventId) {
       const { calendar } = await googleClient(credentials);

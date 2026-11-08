@@ -64,6 +64,10 @@ Your browser opens for approval. The token is saved in `data/google-token.json`.
 
 Guest bookings add a Google Meet link by default. That uses the same calendar permission; no extra scope is needed.
 
+### See a work calendar without changing it
+
+If a calendar is already visible in Google Calendar but Pingu should only treat it as busy time, copy its **Calendar ID** from Google Calendar → **Settings and sharing** → **Integrate calendar**. Set `PINGU_READ_CALENDAR_IDS` to that ID (or a comma-separated list) and restart Pingu. It will include those blocks in searches, availability, and conflict checks, but never exposes their descriptions or lets Pingu edit them.
+
 ## Turn on the chief of staff
 
 It is enabled by default. Pingu reviews newly arrived inbox mail and sends one concise decision list at 9am in `ASSISTANT_TIMEZONE`. It can prepare Gmail drafts and same-day calendar move plans. Nothing is created or moved until you reply with an approval. Pingu never sends email; you send the finished draft from Gmail.

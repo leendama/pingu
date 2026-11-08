@@ -97,6 +97,8 @@ export async function verifyDeleted(port: CalendarPort, eventId: string): Promis
 
 export interface CalendarEventData {
   id?: string | null;
+  /** Availability-only events from a configured secondary calendar have no ID and cannot be changed. */
+  readOnly?: boolean;
   summary?: string | null;
   start?: unknown;
   end?: unknown;
@@ -345,7 +347,7 @@ export async function busyConflict<TWindow extends { startMs: number; endMs: num
   const maxEnd = Math.max(...windows.map((window) => window.endMs));
   const existing = await port.listEvents({ timeMin: new Date(minStart).toISOString(), timeMax: new Date(maxEnd).toISOString() });
   for (const event of existing) {
-    if (!event.id || ignoredIds.has(event.id) || event.status === "cancelled" || event.transparency === "transparent") continue;
+    if ((event.id && ignoredIds.has(event.id)) || event.status === "cancelled" || event.transparency === "transparent") continue;
     const bounds = eventBounds(event, zones);
     const window = bounds && windows.find((candidate) => overlaps(candidate, bounds));
     if (window) return { window, event };
@@ -354,7 +356,8 @@ export async function busyConflict<TWindow extends { startMs: number; endMs: num
 }
 
 function conflictDescription(event: CalendarEventData, window: { startMs: number; endMs: number }, zones: CalendarZones): string {
-  return `Requested window ${new Date(window.startMs).toISOString()} to ${new Date(window.endMs).toISOString()} (timezone ${zones.timezone}) conflicts with existing event ${event.id}${event.summary ? ` (${event.summary})` : ""}; event start ${JSON.stringify(event.start)}, end ${JSON.stringify(event.end)}. Check the full dates and timezone against the user's request before suggesting another time.`;
+  const source = event.id ? `event ${event.id}` : "read-only calendar event";
+  return `Requested window ${new Date(window.startMs).toISOString()} to ${new Date(window.endMs).toISOString()} (timezone ${zones.timezone}) conflicts with existing ${source}${event.summary ? ` (${event.summary})` : ""}; event start ${JSON.stringify(event.start)}, end ${JSON.stringify(event.end)}. Check the full dates and timezone against the user's request before suggesting another time.`;
 }
 
 async function validateMovePlan(
@@ -390,7 +393,7 @@ async function validateMovePlan(
     const related = await port.listEvents({ query: groupName });
     const plannedById = new Map(moves.map((move) => [move.eventId, move]));
     const ordered = related
-      .filter((event) => event.id && !duplicateIds.has(event.id))
+      .filter((event) => event.id && !event.readOnly && !duplicateIds.has(event.id))
       .map((event) => {
         const planned = plannedById.get(event.id!);
         const bounds = planned ?? eventBounds(event, zones);
@@ -548,7 +551,7 @@ export function calendarPlugin(port: CalendarPort): PinguPlugin {
       id: "calendar",
       name: "Google Calendar",
       description: "Search, create, move, recolour, edit, and delete events.",
-      instructions: ["search_calendar omits event descriptions. Call read_calendar_event when the description or invitation text matters.", "Calendar event display schedules and start/end are already normalized to the configured display timezone. Use the display schedule for dates, weekdays and times; do not convert it again. An explicit offset in a timestamp defines the instant, not a separate event timeZone metadata label. On a timezone correction, re-read the event or search the window before answering. Never merely agree with a correction or change an event to repair your own display error."],
+      instructions: ["search_calendar omits event descriptions. Call read_calendar_event when the description or invitation text matters.", "Events marked readOnly have no event ID: use them as busy availability only. Never offer to read, move, edit, recolour, or delete them.", "Calendar event display schedules and start/end are already normalized to the configured display timezone. Use the display schedule for dates, weekdays and times; do not convert it again. An explicit offset in a timestamp defines the instant, not a separate event timeZone metadata label. On a timezone correction, re-read the event or search the window before answering. Never merely agree with a correction or change an event to repair your own display error."],
     },
     [
       {

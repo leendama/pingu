@@ -24,6 +24,14 @@ describe("built-in plugin policy", () => {
     expect(names.has("review_gmail_draft")).toBe(false);
   });
 
+  it("makes every strict tool property required so OpenAI accepts the complete tool list", () => {
+    for (const tool of registry.tools) {
+      if (tool.type !== "function" || tool.strict !== true) continue;
+      const parameters = tool.parameters as { properties?: Record<string, unknown>; required?: string[] };
+      expect(parameters.required ?? []).toEqual(expect.arrayContaining(Object.keys(parameters.properties ?? {})));
+    }
+  });
+
   it("blocks private built-ins in group chats", async () => {
     const result = await registry.run("search_calendar", "{}", context(true));
     expect(result.handled && JSON.parse(result.output).error).toMatch(/private/);

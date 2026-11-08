@@ -49,7 +49,7 @@ function chatContext(overrides: Partial<ToolRunContext> = {}): ToolRunContext {
 
 const draftArgs = {
   to: ["friend@example.com"], cc: [], bcc: [],
-  subject: "Lunch", body: "Midday tomorrow?",
+  subject: "Lunch", body: "Midday tomorrow?", reply_to_message_id: null,
 };
 
 describe("gmailPlugin", () => {
@@ -126,6 +126,14 @@ describe("gmailPlugin", () => {
     expect(decodedParts[1]).toContain(
       'this email was composed by <a href="https://github.com/leendama/pingu"',
     );
+  });
+
+  it("uses a valid strict schema for both new and threaded drafts", () => {
+    const tool = gmailPlugin(fakePort({ raws: [], sent: [] }), fakeStore()).tools.find((item) => item.type === "function" && item.name === "create_gmail_draft");
+    if (!tool || tool.type !== "function") throw new Error("Draft tool is missing.");
+    const parameters = tool.parameters as { properties: Record<string, { type?: unknown }>; required?: string[] };
+    expect(parameters.required).toContain("reply_to_message_id");
+    expect(parameters.properties.reply_to_message_id?.type).toEqual(["string", "null"]);
   });
 
   it("keeps a direct reply draft in the source Gmail thread", async () => {

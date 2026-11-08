@@ -52,6 +52,7 @@ import { meetingOutcomesPlugin } from "./capabilities/meeting-outcomes.js";
 import { meetingReviewPoller,modelMeetingReviewer } from "./meeting-review.js";
 import { PersonalBrain } from "./personal-brain.js";
 import { ownerDecisionFramework, CHIEF_DECISION_FRAMEWORK } from "./owner-decision-framework.js";
+import { MessageStreamHealth } from "./stream-health.js";
 import { granolaPort } from "./granola.js";
 
 export function agentInstructions(settings: RuntimeSettings, pluginInstructions: string[]): string {
@@ -153,12 +154,21 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
   await resetGuestReservations();
 
   // Spectrum is needed to deliver owner approvals and guest notices; connect first.
+  const messageStreamHealth = new MessageStreamHealth();
   const app = await Spectrum({
     projectId: settings.photonProjectId,
     projectSecret: settings.photonProjectSecret,
-    providers: [imessage.config()],
+    providers: [imessage.config({ onHeartbeat: (heartbeat) => {
+      if (heartbeat.stream === "messages") messageStreamHealth.heartbeat(heartbeat.receivedAt);
+    } })],
     telemetry: settings.telemetry,
   });
+  const streamWatchdog = setInterval(() => {
+    if (!messageStreamHealth.needsReconnect()) return;
+    console.error("iMessage message stream heartbeat stopped; restarting the assistant to rebuild the subscription.");
+    void app.stop();
+  }, 30_000);
+  streamWatchdog.unref();
   const imessagePlatform = imessage(app);
   const sendToSpace = async (spaceId: string, text: string): Promise<void> => {
     const space = await imessagePlatform.space.get(spaceId);
@@ -455,6 +465,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
       }
       if (!stopping) throw new Error("The Spectrum message stream ended unexpectedly.");
     } finally {
+      clearInterval(streamWatchdog);
       stopWorkflowRuns();
       stopPriorityReviews();
       stopCommitmentCapture();
@@ -483,6 +494,7 @@ export async function startAgent(settings: RuntimeSettings): Promise<RunningAgen
     done,
     stop: async () => {
       stopping = true;
+      clearInterval(streamWatchdog);
       stopWorkflowRuns();
       stopPriorityReviews();
       stopCommitmentCapture();
